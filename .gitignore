@@ -8,8 +8,8 @@ __pycache__/
 */.ipynb_checkpoints/*
 
 # data
-#data/input  # commented out for the hands on.
-data/working/*
-data/output/*
+data/input/*/
+data/working/*/
+data/output/*/
 
 !.gitkeep
