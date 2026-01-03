@@ -777,3 +777,408 @@ def readTobiiDataWithEventLog(eye_tracking_dir, event_log_path,
         segment['image_path'] = os.path.join(eye_tracking_dir, f"{img_num}_back.png")
 
     return segments
+
+
+# =============================================================================
+# AOI (Area of Interest) 分析関連関数
+# =============================================================================
+
+def loadCoordinates(json_path):
+    """
+    座標JSONファイルを読み込む
+
+    Parameters:
+    -----------
+    json_path : str
+        座標JSONファイルのパス
+
+    Returns:
+    --------
+    dict
+        座標データ
+    """
+    import json
+    with open(json_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def extractAOIs(coordinates, levels=None):
+    """
+    座標データからAOI (Area of Interest) を抽出
+
+    Parameters:
+    -----------
+    coordinates : dict
+        loadCoordinates()で読み込んだ座標データ
+    levels : list of str, optional
+        抽出するレベル。デフォルト: ["paragraph", "sentence", "word", "choice"]
+        - "paragraph": 段落レベル
+        - "sentence": 文レベル
+        - "word": 単語レベル
+        - "choice": 選択肢レベル
+        - "question": 問題文レベル
+
+    Returns:
+    --------
+    list of dict
+        AOIリスト。各要素:
+        {
+            "id": "para_0_sent_1",
+            "level": "sentence",
+            "text": "Could you please...",
+            "bbox": {"x": 295, "y": 113, "width": 348, "height": 19},
+            "parent_ids": {"paragraph": "para_0"}
+        }
+    """
+    if levels is None:
+        levels = ["paragraph", "sentence", "word", "choice"]
+
+    aois = []
+    coords = coordinates.get('coordinates', coordinates)
+
+    # 左パネル（本文）の処理
+    left_panel = coords.get('left_panel', {})
+    passages = left_panel.get('passages', [])
+
+    for passage in passages:
+        for para in passage.get('paragraphs', []):
+            para_idx = para.get('paragraph_index', 0)
+            para_id = f"para_{para_idx}"
+
+            # 段落レベル
+            if "paragraph" in levels:
+                # 段落のbboxは全ての行を包含する領域
+                para_lines = para.get('lines', [])
+                if para_lines:
+                    min_x = min(line['x'] for line in para_lines)
+                    min_y = min(line['y'] for line in para_lines)
+                    max_x = max(line['x'] + line['width'] for line in para_lines)
+                    max_y = max(line['y'] + line['height'] for line in para_lines)
+                    aois.append({
+                        "id": para_id,
+                        "level": "paragraph",
+                        "text": para.get('text', '')[:50] + ('...' if len(para.get('text', '')) > 50 else ''),
+                        "full_text": para.get('text', ''),
+                        "bbox": {"x": min_x, "y": min_y, "width": max_x - min_x, "height": max_y - min_y},
+                        "parent_ids": {}
+                    })
+
+            for sent in para.get('sentences', []):
+                sent_idx = sent.get('sentence_index', 0)
+                sent_id = f"{para_id}_sent_{sent_idx}"
+
+                # 文レベル
+                if "sentence" in levels:
+                    sent_lines = sent.get('lines', [])
+                    if sent_lines:
+                        min_x = min(line['x'] for line in sent_lines)
+                        min_y = min(line['y'] for line in sent_lines)
+                        max_x = max(line['x'] + line['width'] for line in sent_lines)
+                        max_y = max(line['y'] + line['height'] for line in sent_lines)
+                        aois.append({
+                            "id": sent_id,
+                            "level": "sentence",
+                            "text": sent.get('text', ''),
+                            "bbox": {"x": min_x, "y": min_y, "width": max_x - min_x, "height": max_y - min_y},
+                            "parent_ids": {"paragraph": para_id}
+                        })
+
+                # 単語レベル
+                if "word" in levels:
+                    for word in sent.get('words', []):
+                        word_idx = word.get('word_index', 0)
+                        word_id = f"{sent_id}_word_{word_idx}"
+                        bbox = word.get('bbox', {})
+                        aois.append({
+                            "id": word_id,
+                            "level": "word",
+                            "text": word.get('text', ''),
+                            "bbox": bbox,
+                            "parent_ids": {"paragraph": para_id, "sentence": sent_id}
+                        })
+
+    # 右パネル（問題・選択肢）の処理
+    right_panel = coords.get('right_panel', {})
+    questions = right_panel.get('questions', [])
+
+    for q in questions:
+        q_idx = q.get('question_index', 0)
+        q_id = f"question_{q_idx}"
+
+        # 問題文レベル
+        if "question" in levels:
+            q_text = q.get('question_text', {})
+            q_lines = q_text.get('lines', [])
+            if q_lines:
+                min_x = min(line['x'] for line in q_lines)
+                min_y = min(line['y'] for line in q_lines)
+                max_x = max(line['x'] + line['width'] for line in q_lines)
+                max_y = max(line['y'] + line['height'] for line in q_lines)
+                aois.append({
+                    "id": q_id,
+                    "level": "question",
+                    "text": q_text.get('text', ''),
+                    "bbox": {"x": min_x, "y": min_y, "width": max_x - min_x, "height": max_y - min_y},
+                    "parent_ids": {}
+                })
+
+        # 選択肢レベル
+        if "choice" in levels:
+            for choice in q.get('choices', []):
+                choice_id = f"{q_id}_choice_{choice.get('choice_id', '')}"
+                choice_bbox = choice.get('choice_bbox', {})
+                choice_text = choice.get('choice_text', {})
+                aois.append({
+                    "id": choice_id,
+                    "level": "choice",
+                    "text": choice_text.get('text', ''),
+                    "bbox": choice_bbox,
+                    "parent_ids": {"question": q_id}
+                })
+
+    return aois
+
+
+def findAOIForPoint(x, y, aois, level=None):
+    """
+    座標がどのAOIに含まれるか判定
+
+    Parameters:
+    -----------
+    x : float
+        X座標（ピクセル）
+    y : float
+        Y座標（ピクセル）
+    aois : list of dict
+        extractAOIs()で抽出したAOIリスト
+    level : str, optional
+        特定のレベルのみを検索（例: "sentence"）。
+        Noneの場合は全レベルから最小のAOIを返す
+
+    Returns:
+    --------
+    dict or None
+        マッチしたAOI。マッチしない場合はNone
+    """
+    matches = []
+
+    for aoi in aois:
+        if level is not None and aoi['level'] != level:
+            continue
+
+        bbox = aoi['bbox']
+        if (bbox['x'] <= x <= bbox['x'] + bbox['width'] and
+            bbox['y'] <= y <= bbox['y'] + bbox['height']):
+            matches.append(aoi)
+
+    if not matches:
+        return None
+
+    # 複数マッチした場合は最小面積のAOIを返す（より具体的な要素）
+    return min(matches, key=lambda a: a['bbox']['width'] * a['bbox']['height'])
+
+
+def matchFixationsToAOIs(fixations, aois):
+    """
+    全fixationに対してAOIをマッチング
+
+    Parameters:
+    -----------
+    fixations : np.array or pd.DataFrame
+        fixationデータ。カラム: [timestamp, x, y, duration, ...]
+    aois : list of dict
+        extractAOIs()で抽出したAOIリスト
+
+    Returns:
+    --------
+    list of dict
+        各fixationにAOI情報を付加したリスト
+    """
+    import pandas as pd
+
+    # DataFrameに変換
+    if isinstance(fixations, np.ndarray):
+        df = pd.DataFrame(fixations, columns=[
+            'timestamp', 'x', 'y', 'duration',
+            'saccade_length', 'saccade_angle', 'saccade_speed', 'pupil_diameter'
+        ])
+    else:
+        df = fixations.copy()
+
+    results = []
+
+    for _, row in df.iterrows():
+        x, y = row['x'], row['y']
+
+        # 各レベルでマッチング
+        word_aoi = findAOIForPoint(x, y, aois, level="word")
+        sent_aoi = findAOIForPoint(x, y, aois, level="sentence")
+        para_aoi = findAOIForPoint(x, y, aois, level="paragraph")
+        choice_aoi = findAOIForPoint(x, y, aois, level="choice")
+        question_aoi = findAOIForPoint(x, y, aois, level="question")
+
+        result = {
+            'timestamp': row['timestamp'],
+            'x': x,
+            'y': y,
+            'duration': row['duration'],
+            'pupil_diameter': row.get('pupil_diameter', np.nan),
+            # 各レベルのAOI情報
+            'word_id': word_aoi['id'] if word_aoi else None,
+            'word_text': word_aoi['text'] if word_aoi else None,
+            'sentence_id': sent_aoi['id'] if sent_aoi else None,
+            'sentence_text': sent_aoi['text'] if sent_aoi else None,
+            'paragraph_id': para_aoi['id'] if para_aoi else None,
+            'choice_id': choice_aoi['id'] if choice_aoi else None,
+            'choice_text': choice_aoi['text'] if choice_aoi else None,
+            'question_id': question_aoi['id'] if question_aoi else None,
+        }
+        results.append(result)
+
+    return results
+
+
+def computeAOIStatistics(matched_fixations, level="sentence"):
+    """
+    各AOIの注視統計を計算
+
+    Parameters:
+    -----------
+    matched_fixations : list of dict
+        matchFixationsToAOIs()の戻り値
+    level : str
+        集計するレベル（"word", "sentence", "paragraph", "choice"）
+
+    Returns:
+    --------
+    pd.DataFrame
+        各AOIの統計:
+        - aoi_id: AOIのID
+        - total_duration: 総注視時間
+        - fixation_count: 注視回数
+        - first_fixation_time: 最初の注視時刻
+        - mean_duration: 平均注視時間
+        - revisits: 再訪問回数
+    """
+    import pandas as pd
+    from collections import defaultdict
+
+    id_key = f"{level}_id"
+    text_key = f"{level}_text" if level != "paragraph" else None
+
+    # AOIごとにfixationを集計
+    aoi_data = defaultdict(list)
+
+    for fix in matched_fixations:
+        aoi_id = fix.get(id_key)
+        if aoi_id is not None:
+            aoi_data[aoi_id].append(fix)
+
+    # 統計計算
+    stats = []
+    for aoi_id, fixations in aoi_data.items():
+        durations = [f['duration'] for f in fixations]
+        timestamps = [f['timestamp'] for f in fixations]
+
+        # 再訪問回数（連続しないfixationのグループ数 - 1）
+        revisits = 0
+        prev_idx = -2
+        for fix in sorted(fixations, key=lambda x: x['timestamp']):
+            fix_idx = matched_fixations.index(fix)
+            if fix_idx != prev_idx + 1:
+                revisits += 1
+            prev_idx = fix_idx
+        revisits = max(0, revisits - 1)
+
+        text = fixations[0].get(text_key, '') if text_key else ''
+
+        stats.append({
+            'aoi_id': aoi_id,
+            'level': level,
+            'text': text[:50] + ('...' if len(text) > 50 else '') if text else '',
+            'total_duration': sum(durations),
+            'fixation_count': len(fixations),
+            'mean_duration': np.mean(durations),
+            'first_fixation_time': min(timestamps),
+            'revisits': revisits
+        })
+
+    return pd.DataFrame(stats).sort_values('first_fixation_time')
+
+
+def plotAOIWithGaze(image_path, aois, fixations, level="sentence",
+                    save_path=None, figsize=(16, 9)):
+    """
+    背景画像にAOI領域とfixationを重ねて可視化
+
+    Parameters:
+    -----------
+    image_path : str
+        背景画像のパス
+    aois : list of dict
+        extractAOIs()で抽出したAOIリスト
+    fixations : np.array or pd.DataFrame
+        fixationデータ
+    level : str
+        表示するAOIレベル（"word", "sentence", "paragraph", "choice"）
+    save_path : str, optional
+        保存先パス
+    figsize : tuple
+        図のサイズ
+    """
+    import os
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+
+    _, ax = plt.subplots(figsize=figsize)
+
+    # 背景画像
+    if image_path and os.path.exists(image_path):
+        img = plt.imread(image_path)
+        ax.imshow(img)
+
+    # AOI領域を描画
+    colors = {
+        'word': 'blue',
+        'sentence': 'green',
+        'paragraph': 'orange',
+        'choice': 'purple',
+        'question': 'red'
+    }
+
+    for aoi in aois:
+        if aoi['level'] != level:
+            continue
+
+        bbox = aoi['bbox']
+        rect = patches.Rectangle(
+            (bbox['x'], bbox['y']), bbox['width'], bbox['height'],
+            linewidth=1, edgecolor=colors.get(level, 'gray'),
+            facecolor='none', alpha=0.7
+        )
+        ax.add_patch(rect)
+
+    # fixationを描画
+    if isinstance(fixations, np.ndarray):
+        fx, fy, fdur = fixations[:, 1], fixations[:, 2], fixations[:, 3]
+    else:
+        fx, fy, fdur = fixations['x'], fixations['y'], fixations['duration']
+
+    # 注視時間に応じたサイズ
+    sizes = np.array(fdur) * 500
+
+    ax.scatter(fx, fy, s=sizes, c='red', alpha=0.5, edgecolors='darkred')
+
+    ax.set_xlim(0, 1920)
+    ax.set_ylim(1080, 0)  # Y軸反転
+    ax.set_title(f'AOI ({level}) with Fixations')
+    ax.axis('off')
+
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()
