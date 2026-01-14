@@ -4,6 +4,129 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 import matplotlib.cm as cm
 from scipy.stats import multivariate_normal
+from dataclasses import dataclass, field
+from typing import List, Dict
+
+
+# =============================================================================
+# フェーズ設定
+# =============================================================================
+
+@dataclass
+class PhaseConfig:
+    """実験フェーズの設定"""
+    phase_name: str                      # "pre", "training1", etc.
+    phase_type: str                      # "simple" (単一イベント) or "multi" (複数イベント)
+    segment_event_types: List[str]       # セグメント境界となるイベントタイプ
+    image_mapping: Dict[str, str] = field(default_factory=dict)  # event_type -> image_number
+    use_formula_mapping: bool = True     # True: 式計算, False: dict参照
+    image_offset: int = 2                # 式計算時のオフセット (passage番号 + offset)
+    extract_event_type: bool = False     # セグメントにevent_typeを含めるか
+    extract_analog_id: bool = False      # セグメントにanalog_idを含めるか
+
+
+# Training フェーズ用の画像マッピング
+_TRAINING_IMAGE_MAPPING = {
+    'phase_intro_enter': '002',        # intro画面
+    'question_screen_open': '003',     # 問題画面
+    'reflection1_open': '004',         # reflection1画面
+    'training_explanation_open': '005', # 解説
+    'analog_intro_enter': '006',       # 類題intro画面
+    'analog_question_open_an1': '007', # 類題1
+    'analog_explanation_open_an1': '008', # 類題1解説
+    'analog_question_open_an2': '009', # 類題2
+    'analog_explanation_open_an2': '010', # 類題2解説
+    'analog_question_open_an3': '011', # 類題3
+    'analog_explanation_open_an3': '012', # 類題3解説
+    'reflection2_open': '013',         # reflection2画面
+    'phase_complete_enter': '014',     # complete画面
+}
+
+# フェーズ設定辞書
+PHASE_CONFIGS = {
+    "pre": PhaseConfig(
+        phase_name="pre",
+        phase_type="simple",
+        segment_event_types=["question_screen_open"],
+        image_mapping={},
+        use_formula_mapping=True,
+        image_offset=2,
+        extract_event_type=False,
+        extract_analog_id=False,
+    ),
+    "post": PhaseConfig(
+        phase_name="post",
+        phase_type="simple",
+        segment_event_types=["question_screen_open"],
+        image_mapping={},
+        use_formula_mapping=True,
+        image_offset=2,
+        extract_event_type=False,
+        extract_analog_id=False,
+    ),
+    "training1": PhaseConfig(
+        phase_name="training1",
+        phase_type="multi",
+        segment_event_types=[
+            'phase_intro_enter',
+            'question_screen_open',
+            'reflection1_open',
+            'training_explanation_open',
+            'analog_intro_enter',
+            'analog_question_open',
+            'analog_explanation_open',
+            'reflection2_open',
+            'phase_complete_enter'
+        ],
+        image_mapping=_TRAINING_IMAGE_MAPPING,
+        use_formula_mapping=False,
+        extract_event_type=True,
+        extract_analog_id=True,
+    ),
+    "training2": PhaseConfig(
+        phase_name="training2",
+        phase_type="multi",
+        segment_event_types=[
+            'phase_intro_enter',
+            'question_screen_open',
+            'reflection1_open',
+            'training_explanation_open',
+            'analog_intro_enter',
+            'analog_question_open',
+            'analog_explanation_open',
+            'reflection2_open',
+            'phase_complete_enter'
+        ],
+        image_mapping=_TRAINING_IMAGE_MAPPING,
+        use_formula_mapping=False,
+        extract_event_type=True,
+        extract_analog_id=True,
+    ),
+    "training3": PhaseConfig(
+        phase_name="training3",
+        phase_type="multi",
+        segment_event_types=[
+            'phase_intro_enter',
+            'question_screen_open',
+            'reflection1_open',
+            'training_explanation_open',
+            'analog_intro_enter',
+            'analog_question_open',
+            'analog_explanation_open',
+            'reflection2_open',
+            'phase_complete_enter'
+        ],
+        image_mapping=_TRAINING_IMAGE_MAPPING,
+        use_formula_mapping=False,
+        extract_event_type=True,
+        extract_analog_id=True,
+    ),
+}
+
+
+# =============================================================================
+# Fixation検出
+# =============================================================================
 
 
 def isMinimumFixation(X, Y, mfx):
@@ -666,6 +789,224 @@ def passageIdToImageNumber(passage_id):
     return str(image_number).zfill(3)
 
 
+# =============================================================================
+# 統合データ読み込み関数
+# =============================================================================
+
+def segmentGazeDataUnified(gaze_csv_path, events, end_timestamp, phase_config,
+                           apply_head_correction=False,
+                           correction_method="geometric",
+                           # geometric方式用
+                           use_average_reference=False,
+                           correct_y=False,
+                           calibration_head_x=0.0,
+                           calibration_head_y=0.0,
+                           screen_width_mm=509.0,
+                           screen_height_mm=287.0,
+                           screen_width_px=1920,
+                           screen_height_px=1080,
+                           # trackbox方式用
+                           correction_factor_x=500.0,
+                           correction_factor_y=200.0,
+                           calibration_center_x=0.5,
+                           calibration_center_y=0.5):
+    """
+    統合セグメント化関数（全フェーズ対応）
+
+    Parameters:
+    -----------
+    gaze_csv_path : str
+        tobii_pro_gaze.csvのパス
+    events : list of dict
+        readEventLog()またはreadEventLogMultiple()の戻り値
+    end_timestamp : float or None
+        最後のセグメントの終了タイムスタンプ
+    phase_config : PhaseConfig
+        フェーズ設定
+
+    Returns:
+    --------
+    list of dict
+        各セグメントのデータ（統一構造）
+    """
+    import pandas as pd
+
+    # 読み込むカラムを決定
+    base_cols = ['#timestamp', 'gaze_x', 'gaze_y', 'pupil_diameter']
+    if apply_head_correction:
+        df = pd.read_csv(gaze_csv_path)
+    else:
+        df = pd.read_csv(gaze_csv_path, usecols=base_cols)
+
+    df = df.dropna(subset=['gaze_x', 'gaze_y', 'pupil_diameter'])
+    df['timestamp_sec'] = df['#timestamp'] * 0.001 + 32400
+
+    # 頭部位置補正
+    if apply_head_correction:
+        if correction_method == "geometric":
+            df = correctGazeGeometric(df,
+                                      calibration_head_x=calibration_head_x,
+                                      calibration_head_y=calibration_head_y,
+                                      use_average_reference=use_average_reference,
+                                      correct_y=correct_y,
+                                      screen_width_mm=screen_width_mm,
+                                      screen_height_mm=screen_height_mm,
+                                      screen_width_px=screen_width_px,
+                                      screen_height_px=screen_height_px)
+        else:
+            df = correctGazeForHeadPosition(df,
+                                            correction_factor_x=correction_factor_x,
+                                            correction_factor_y=correction_factor_y,
+                                            calibration_center_x=calibration_center_x,
+                                            calibration_center_y=calibration_center_y)
+        gaze_x_col = 'corrected_gaze_x'
+        gaze_y_col = 'corrected_gaze_y'
+    else:
+        gaze_x_col = 'gaze_x'
+        gaze_y_col = 'gaze_y'
+
+    segments = []
+
+    for i, event in enumerate(events):
+        start_time = event['timestamp']
+
+        # 終了時刻の決定
+        if i + 1 < len(events):
+            end_time = events[i + 1]['timestamp']
+        elif end_timestamp is not None:
+            end_time = end_timestamp
+        else:
+            end_time = df['timestamp_sec'].max() + 1
+
+        # データ抽出
+        mask = (df['timestamp_sec'] >= start_time) & (df['timestamp_sec'] < end_time)
+        segment_df = df[mask]
+
+        if len(segment_df) == 0:
+            continue
+
+        data = np.vstack((
+            segment_df['timestamp_sec'].values,
+            segment_df[gaze_x_col].values,
+            segment_df[gaze_y_col].values,
+            segment_df['pupil_diameter'].values
+        )).T
+
+        # 画像番号の決定
+        if phase_config.use_formula_mapping:
+            image_number = passageIdToImageNumber(event.get('passage_id', ''))
+        else:
+            event_type = event.get('event_type', '')
+            image_number = phase_config.image_mapping.get(event_type, '000')
+
+        # セグメント構造
+        segment = {
+            'data': data,
+            'image_number': image_number,
+            'start_time': start_time,
+            'end_time': end_time,
+            'duration': end_time - start_time,
+            'passage_id': event.get('passage_id'),
+        }
+
+        # フェーズ設定に基づいて追加フィールド
+        if phase_config.extract_event_type:
+            segment['event_type'] = event.get('event_type')
+        if phase_config.extract_analog_id:
+            segment['analog_id'] = event.get('analog_id')
+
+        segments.append(segment)
+
+    return segments
+
+
+def readTobiiData(eye_tracking_dir, event_log_path, phase="pre",
+                  apply_head_correction=False,
+                  correction_method=None,
+                  # geometric方式用
+                  use_average_reference=False,
+                  correct_y=False,
+                  calibration_head_x=0.0,
+                  calibration_head_y=0.0,
+                  screen_width_mm=509.0,
+                  screen_height_mm=287.0,
+                  screen_width_px=1920,
+                  screen_height_px=1080,
+                  # trackbox方式用
+                  correction_factor_x=500.0,
+                  correction_factor_y=200.0,
+                  calibration_center_x=0.5,
+                  calibration_center_y=0.5):
+    """
+    統合データ読み込み関数（全フェーズ対応）
+
+    Parameters:
+    -----------
+    eye_tracking_dir : str
+        eye_trackingディレクトリ（tobii_pro_gaze.csvと背景画像を含む）
+    event_log_path : str
+        events.jsonlのパス
+    phase : str
+        フェーズ名（"pre", "training1", "training2", "posttest"）
+    apply_head_correction : bool
+        頭部位置補正を適用するか
+    correction_method : str or None
+        補正方式。Noneの場合はフェーズのデフォルトを使用
+
+    Returns:
+    --------
+    list of dict
+        各セグメントの情報（統一構造）
+    """
+    import os
+
+    # フェーズ設定を取得
+    if phase not in PHASE_CONFIGS:
+        raise ValueError(f"Unknown phase '{phase}'. Available: {list(PHASE_CONFIGS.keys())}")
+    phase_config = PHASE_CONFIGS[phase]
+
+    # 補正方式のデフォルト
+    if correction_method is None:
+        correction_method = "trackbox" if phase.startswith("training") else "geometric"
+
+    # イベント読み込み
+    if phase_config.phase_type == "simple":
+        events = readEventLog(event_log_path, phase_config.segment_event_types[0])
+    else:
+        events = readEventLogMultiple(event_log_path, phase_config.segment_event_types)
+
+    # 終了イベントのタイムスタンプ
+    end_events = readEventLog(event_log_path, "phase_complete_enter")
+    end_timestamp = end_events[0]['timestamp'] if end_events else None
+
+    # セグメント化
+    gaze_csv = os.path.join(eye_tracking_dir, "tobii_pro_gaze.csv")
+    segments = segmentGazeDataUnified(
+        gaze_csv, events, end_timestamp, phase_config,
+        apply_head_correction=apply_head_correction,
+        correction_method=correction_method,
+        use_average_reference=use_average_reference,
+        correct_y=correct_y,
+        calibration_head_x=calibration_head_x,
+        calibration_head_y=calibration_head_y,
+        screen_width_mm=screen_width_mm,
+        screen_height_mm=screen_height_mm,
+        screen_width_px=screen_width_px,
+        screen_height_px=screen_height_px,
+        correction_factor_x=correction_factor_x,
+        correction_factor_y=correction_factor_y,
+        calibration_center_x=calibration_center_x,
+        calibration_center_y=calibration_center_y
+    )
+
+    # 背景画像パスを追加
+    for segment in segments:
+        img_num = segment['image_number']
+        segment['image_path'] = os.path.join(eye_tracking_dir, f"{img_num}_back.png")
+
+    return segments
+
+
 def readTobiiDataWithEventLog(eye_tracking_dir, event_log_path,
                                 event_type="question_screen_open",
                                 end_event_type="phase_complete_enter",
@@ -738,8 +1079,17 @@ def readTobiiDataWithEventLog(eye_tracking_dir, event_log_path,
           "data": np.array,
           "image_path": str,
           "image_number": str}, ...]
+
+    .. deprecated::
+        Use readTobiiData(phase="pre") instead.
     """
     import os
+    import warnings
+    warnings.warn(
+        "readTobiiDataWithEventLog is deprecated. Use readTobiiData(phase='pre') instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
 
     # イベント読み込み
     events = readEventLog(event_log_path, event_type)
@@ -1104,6 +1454,234 @@ def computeAOIStatistics(matched_fixations, level="sentence"):
         })
 
     return pd.DataFrame(stats).sort_values('first_fixation_time')
+
+
+# =============================================================================
+# Training フェーズ対応関数
+# =============================================================================
+
+# Training フェーズのイベントタイプと画像番号のマッピング
+TRAINING_EVENT_TO_IMAGE = {
+    'phase_intro_enter': '002',        # intro画面
+    'question_screen_open': '003',     # 問題画面
+    'reflection1_open': '004',         # reflection1画面
+    'training_explanation_open': '005', # 解説
+    'analog_intro_enter': '006',       # 類題intro画面
+    'analog_question_open_an1': '007', # 類題1
+    'analog_explanation_open_an1': '008', # 類題1解説
+    'analog_question_open_an2': '009', # 類題2
+    'analog_explanation_open_an2': '010', # 類題2解説
+    'analog_question_open_an3': '011', # 類題3
+    'analog_explanation_open_an3': '012', # 類題3解説
+    'reflection2_open': '013',         # reflection2画面
+    'phase_complete_enter': '014',     # complete画面
+}
+
+
+def readEventLogMultiple(jsonl_path, event_types):
+    """
+    JSONLイベントログから複数のイベントタイプを抽出
+
+    Parameters:
+    -----------
+    jsonl_path : str
+        イベントログファイルのパス (.jsonl)
+    event_types : list of str
+        抽出するイベントタイプのリスト
+
+    Returns:
+    --------
+    list of dict
+        各イベントの情報（タイムスタンプ順にソート）
+    """
+    import json
+    from datetime import datetime
+
+    events = []
+
+    with open(jsonl_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            data = json.loads(line.strip())
+            if data.get('event') in event_types:
+                iso_timestamp = data['timestamp']
+                dt_utc = datetime.fromisoformat(iso_timestamp.replace('Z', '+00:00'))
+                dt_local = dt_utc.astimezone()
+                unix_timestamp = dt_local.timestamp()
+
+                # analog_id を含むイベントは event_type を拡張
+                event_type = data['event']
+                analog_id = data.get('analog_id', '')
+                if analog_id:
+                    # tr_01_an1 -> an1
+                    analog_suffix = analog_id.split('_')[-1]
+                    event_type = f"{event_type}_{analog_suffix}"
+
+                events.append({
+                    'timestamp': unix_timestamp,
+                    'event_type': event_type,
+                    'passage_id': data.get('passage_id'),
+                    'analog_id': analog_id,
+                    'raw_data': data
+                })
+
+    # タイムスタンプ順にソート
+    events.sort(key=lambda x: x['timestamp'])
+    return events
+
+
+def segmentGazeDataForTraining(gaze_csv_path, events,
+                                apply_head_correction=False,
+                                correction_method="trackbox",
+                                correction_factor_x=500.0,
+                                correction_factor_y=200.0):
+    """
+    Training フェーズ用の視線データセグメント化
+
+    Parameters:
+    -----------
+    gaze_csv_path : str
+        tobii_pro_gaze.csvのパス
+    events : list of dict
+        readEventLogMultiple()の戻り値
+    apply_head_correction : bool
+        頭部位置補正を適用するか
+    correction_method : str
+        補正方式
+    correction_factor_x : float
+        X軸補正係数
+    correction_factor_y : float
+        Y軸補正係数
+
+    Returns:
+    --------
+    list of dict
+        各セグメントのデータ
+    """
+    import pandas as pd
+
+    df = pd.read_csv(gaze_csv_path)
+    df = df.dropna(subset=['gaze_x', 'gaze_y', 'pupil_diameter'])
+    df['timestamp_sec'] = df['#timestamp'] * 0.001 + 32400
+
+    if apply_head_correction:
+        if correction_method == "trackbox":
+            df = correctGazeForHeadPosition(df, correction_factor_x, correction_factor_y)
+        gaze_x_col = 'corrected_gaze_x'
+        gaze_y_col = 'corrected_gaze_y'
+    else:
+        gaze_x_col = 'gaze_x'
+        gaze_y_col = 'gaze_y'
+
+    segments = []
+
+    for i in range(len(events)):
+        start_event = events[i]
+        start_time = start_event['timestamp']
+
+        # 次のイベントまで
+        if i + 1 < len(events):
+            end_time = events[i + 1]['timestamp']
+        else:
+            end_time = df['timestamp_sec'].max() + 1
+
+        mask = (df['timestamp_sec'] >= start_time) & (df['timestamp_sec'] < end_time)
+        segment_df = df[mask]
+
+        if len(segment_df) > 0:
+            data = np.vstack((
+                segment_df['timestamp_sec'].values,
+                segment_df[gaze_x_col].values,
+                segment_df[gaze_y_col].values,
+                segment_df['pupil_diameter'].values
+            )).T
+
+            # 画像番号を取得
+            event_type = start_event['event_type']
+            image_number = TRAINING_EVENT_TO_IMAGE.get(event_type, '000')
+
+            segments.append({
+                'event_type': event_type,
+                'passage_id': start_event['passage_id'],
+                'analog_id': start_event.get('analog_id'),
+                'image_number': image_number,
+                'data': data,
+                'start_time': start_time,
+                'end_time': end_time,
+                'duration': end_time - start_time
+            })
+
+    return segments
+
+
+def readTobiiDataForTraining(eye_tracking_dir, event_log_path,
+                              apply_head_correction=False,
+                              correction_method="trackbox",
+                              correction_factor_x=500.0,
+                              correction_factor_y=200.0):
+    """
+    Training フェーズ用のデータ読み込み・セグメント化
+
+    Parameters:
+    -----------
+    eye_tracking_dir : str
+        eye_trackingディレクトリ
+    event_log_path : str
+        イベントログ (.jsonl) のパス
+    apply_head_correction : bool
+        頭部位置補正を適用するか
+    correction_method : str
+        補正方式
+    correction_factor_x : float
+        X軸補正係数
+    correction_factor_y : float
+        Y軸補正係数
+
+    Returns:
+    --------
+    list of dict
+        各セグメントの情報
+
+    .. deprecated::
+        Use readTobiiData(phase="training1") instead.
+    """
+    import os
+    import warnings
+    warnings.warn(
+        "readTobiiDataForTraining is deprecated. Use readTobiiData(phase='training1') instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+
+    # 対象イベントタイプ
+    event_types = [
+        'phase_intro_enter',
+        'question_screen_open',
+        'reflection1_open',
+        'training_explanation_open',
+        'analog_intro_enter',
+        'analog_question_open',
+        'analog_explanation_open',
+        'reflection2_open',
+        'phase_complete_enter'
+    ]
+
+    events = readEventLogMultiple(event_log_path, event_types)
+
+    gaze_csv = os.path.join(eye_tracking_dir, "tobii_pro_gaze.csv")
+    segments = segmentGazeDataForTraining(
+        gaze_csv, events,
+        apply_head_correction=apply_head_correction,
+        correction_method=correction_method,
+        correction_factor_x=correction_factor_x,
+        correction_factor_y=correction_factor_y
+    )
+
+    # 背景画像パスを追加
+    for segment in segments:
+        img_num = segment['image_number']
+        segment['image_path'] = os.path.join(eye_tracking_dir, f"{img_num}_back.png")
+
+    return segments
 
 
 def plotAOIWithGaze(image_path, aois, fixations, level="sentence",
