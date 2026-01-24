@@ -1,4 +1,5 @@
 import math
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
@@ -1007,128 +1008,6 @@ def readTobiiData(eye_tracking_dir, event_log_path, phase="pre",
     return segments
 
 
-def readTobiiDataWithEventLog(eye_tracking_dir, event_log_path,
-                                event_type="question_screen_open",
-                                end_event_type="phase_complete_enter",
-                                apply_head_correction=False,
-                                correction_method="geometric",
-                                # geometric方式用
-                                use_average_reference=False,
-                                correct_y=False,
-                                calibration_head_x=0.0,
-                                calibration_head_y=0.0,
-                                screen_width_mm=509.0,
-                                screen_height_mm=287.0,
-                                screen_width_px=1920,
-                                screen_height_px=1080,
-                                # trackbox方式用
-                                correction_factor_x=500.0,
-                                correction_factor_y=200.0,
-                                calibration_center_x=0.5,
-                                calibration_center_y=0.5):
-    """
-    イベントログベースで視線データを読み込み・セグメント化
-
-    Parameters:
-    -----------
-    eye_tracking_dir : str
-        eye_trackingディレクトリ（tobii_pro_gaze.csvと背景画像を含む）
-    event_log_path : str
-        events.jsonlのパス
-    event_type : str
-        セグメント化に使うイベントタイプ
-    end_event_type : str
-        最後のセグメントの終了イベントタイプ（デフォルト: "phase_complete_enter"）
-    apply_head_correction : bool
-        頭部位置補正を適用するか（デフォルト: False）
-    correction_method : str
-        補正方式: "geometric"（mm単位、距離考慮）または "trackbox"（従来方式）
-    use_average_reference : bool
-        平均頭部位置を基準にするか（geometric方式用）。デフォルト: False
-    correct_y : bool
-        Y軸も補正するか（geometric方式用）。デフォルト: False
-    --- geometric方式用 ---
-    calibration_head_x : float
-        キャリブレーション時の頭部X位置（mm）。デフォルト: 0.0
-    calibration_head_y : float
-        キャリブレーション時の頭部Y位置（mm）。デフォルト: 0.0
-    screen_width_mm : float
-        画面の物理幅（mm）。デフォルト: 509.0
-    screen_height_mm : float
-        画面の物理高さ（mm）。デフォルト: 287.0
-    screen_width_px : int
-        画面の横解像度。デフォルト: 1920
-    screen_height_px : int
-        画面の縦解像度。デフォルト: 1080
-
-    --- trackbox方式用 ---
-    correction_factor_x : float
-        X軸補正係数。デフォルト: 500.0
-    correction_factor_y : float
-        Y軸補正係数。デフォルト: 200.0
-    calibration_center_x : float
-        キャリブレーション時の頭部X位置（trackbox座標）。デフォルト: 0.5
-    calibration_center_y : float
-        キャリブレーション時の頭部Y位置（trackbox座標）。デフォルト: 0.5
-
-    Returns:
-    --------
-    list of dict
-        各セグメントの情報
-        [{"passage_id": str,
-          "data": np.array,
-          "image_path": str,
-          "image_number": str}, ...]
-
-    .. deprecated::
-        Use readTobiiData(phase="pre") instead.
-    """
-    import os
-    import warnings
-    warnings.warn(
-        "readTobiiDataWithEventLog is deprecated. Use readTobiiData(phase='pre') instead.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-
-    # イベント読み込み
-    events = readEventLog(event_log_path, event_type)
-
-    # 終了イベントのタイムスタンプを取得
-    end_events = readEventLog(event_log_path, end_event_type)
-    end_timestamp = end_events[0]['timestamp'] if end_events else None
-
-    # 視線データセグメント化（tobii_pro_gaze.csvを使用）
-    gaze_csv = os.path.join(eye_tracking_dir, "tobii_pro_gaze.csv")
-    segments = segmentGazeDataByEvents(
-        gaze_csv, events, end_timestamp,
-        apply_head_correction=apply_head_correction,
-        correction_method=correction_method,
-        # geometric方式用
-        use_average_reference=use_average_reference,
-        correct_y=correct_y,
-        calibration_head_x=calibration_head_x,
-        calibration_head_y=calibration_head_y,
-        screen_width_mm=screen_width_mm,
-        screen_height_mm=screen_height_mm,
-        screen_width_px=screen_width_px,
-        screen_height_px=screen_height_px,
-        # trackbox方式用
-        correction_factor_x=correction_factor_x,
-        correction_factor_y=correction_factor_y,
-        calibration_center_x=calibration_center_x,
-        calibration_center_y=calibration_center_y
-    )
-
-    # 背景画像パスを追加
-    for segment in segments:
-        img_num = passageIdToImageNumber(segment['passage_id'])
-        segment['image_number'] = img_num
-        segment['image_path'] = os.path.join(eye_tracking_dir, f"{img_num}_back.png")
-
-    return segments
-
-
 # =============================================================================
 # AOI (Area of Interest) 分析関連関数
 # =============================================================================
@@ -1190,6 +1069,10 @@ def extractAOIs(coordinates, levels=None):
     left_panel = coords.get('left_panel', {})
     passages = left_panel.get('passages', [])
 
+    # trainingのような言語別座標の場合、日本語版を優先
+    if not passages:
+        passages = left_panel.get('passages_ja', left_panel.get('passages_en', []))
+
     for passage in passages:
         for para in passage.get('paragraphs', []):
             para_idx = para.get('paragraph_index', 0)
@@ -1200,16 +1083,15 @@ def extractAOIs(coordinates, levels=None):
                 # 段落のbboxは全ての行を包含する領域
                 para_lines = para.get('lines', [])
                 if para_lines:
-                    min_x = min(line['x'] for line in para_lines)
-                    min_y = min(line['y'] for line in para_lines)
-                    max_x = max(line['x'] + line['width'] for line in para_lines)
-                    max_y = max(line['y'] + line['height'] for line in para_lines)
+                    bboxes, encompassing_bbox, is_multiline = _lines_to_bboxes(para_lines)
                     aois.append({
                         "id": para_id,
                         "level": "paragraph",
                         "text": para.get('text', '')[:50] + ('...' if len(para.get('text', '')) > 50 else ''),
                         "full_text": para.get('text', ''),
-                        "bbox": {"x": min_x, "y": min_y, "width": max_x - min_x, "height": max_y - min_y},
+                        "bbox": encompassing_bbox,
+                        "bboxes": bboxes,
+                        "is_multiline": is_multiline,
                         "parent_ids": {}
                     })
 
@@ -1221,15 +1103,14 @@ def extractAOIs(coordinates, levels=None):
                 if "sentence" in levels:
                     sent_lines = sent.get('lines', [])
                     if sent_lines:
-                        min_x = min(line['x'] for line in sent_lines)
-                        min_y = min(line['y'] for line in sent_lines)
-                        max_x = max(line['x'] + line['width'] for line in sent_lines)
-                        max_y = max(line['y'] + line['height'] for line in sent_lines)
+                        bboxes, encompassing_bbox, is_multiline = _lines_to_bboxes(sent_lines)
                         aois.append({
                             "id": sent_id,
                             "level": "sentence",
                             "text": sent.get('text', ''),
-                            "bbox": {"x": min_x, "y": min_y, "width": max_x - min_x, "height": max_y - min_y},
+                            "bbox": encompassing_bbox,
+                            "bboxes": bboxes,
+                            "is_multiline": is_multiline,
                             "parent_ids": {"paragraph": para_id}
                         })
 
@@ -1260,15 +1141,14 @@ def extractAOIs(coordinates, levels=None):
             q_text = q.get('question_text', {})
             q_lines = q_text.get('lines', [])
             if q_lines:
-                min_x = min(line['x'] for line in q_lines)
-                min_y = min(line['y'] for line in q_lines)
-                max_x = max(line['x'] + line['width'] for line in q_lines)
-                max_y = max(line['y'] + line['height'] for line in q_lines)
+                bboxes, encompassing_bbox, is_multiline = _lines_to_bboxes(q_lines)
                 aois.append({
                     "id": q_id,
                     "level": "question",
                     "text": q_text.get('text', ''),
-                    "bbox": {"x": min_x, "y": min_y, "width": max_x - min_x, "height": max_y - min_y},
+                    "bbox": encompassing_bbox,
+                    "bboxes": bboxes,
+                    "is_multiline": is_multiline,
                     "parent_ids": {}
                 })
 
@@ -1287,6 +1167,29 @@ def extractAOIs(coordinates, levels=None):
                 })
 
     return aois
+
+
+def _point_in_bboxes(x, y, bboxes):
+    """
+    点が複数のbboxのいずれかに含まれるか判定
+
+    Parameters:
+    -----------
+    x, y : float
+        チェックする座標
+    bboxes : list of dict
+        bboxのリスト [{x, y, width, height}, ...]
+
+    Returns:
+    --------
+    bool
+        いずれかのbboxに含まれればTrue
+    """
+    for bbox in bboxes:
+        if (bbox['x'] <= x <= bbox['x'] + bbox['width'] and
+            bbox['y'] <= y <= bbox['y'] + bbox['height']):
+            return True
+    return False
 
 
 def findAOIForPoint(x, y, aois, level=None):
@@ -1316,16 +1219,28 @@ def findAOIForPoint(x, y, aois, level=None):
         if level is not None and aoi['level'] != level:
             continue
 
-        bbox = aoi['bbox']
-        if (bbox['x'] <= x <= bbox['x'] + bbox['width'] and
-            bbox['y'] <= y <= bbox['y'] + bbox['height']):
-            matches.append(aoi)
+        # multiline AOIの場合は個別のbboxをチェック
+        if aoi.get('is_multiline') and 'bboxes' in aoi:
+            if _point_in_bboxes(x, y, aoi['bboxes']):
+                matches.append(aoi)
+        else:
+            # 単一行または後方互換性
+            bbox = aoi['bbox']
+            if (bbox['x'] <= x <= bbox['x'] + bbox['width'] and
+                bbox['y'] <= y <= bbox['y'] + bbox['height']):
+                matches.append(aoi)
 
     if not matches:
         return None
 
     # 複数マッチした場合は最小面積のAOIを返す（より具体的な要素）
-    return min(matches, key=lambda a: a['bbox']['width'] * a['bbox']['height'])
+    # multiline AOIの場合はbboxesの合計面積を使用
+    def get_area(aoi):
+        if aoi.get('is_multiline') and 'bboxes' in aoi:
+            return sum(b['width'] * b['height'] for b in aoi['bboxes'])
+        return aoi['bbox']['width'] * aoi['bbox']['height']
+
+    return min(matches, key=get_area)
 
 
 def matchFixationsToAOIs(fixations, aois):
@@ -1613,77 +1528,6 @@ def segmentGazeDataForTraining(gaze_csv_path, events,
     return segments
 
 
-def readTobiiDataForTraining(eye_tracking_dir, event_log_path,
-                              apply_head_correction=False,
-                              correction_method="trackbox",
-                              correction_factor_x=500.0,
-                              correction_factor_y=200.0):
-    """
-    Training フェーズ用のデータ読み込み・セグメント化
-
-    Parameters:
-    -----------
-    eye_tracking_dir : str
-        eye_trackingディレクトリ
-    event_log_path : str
-        イベントログ (.jsonl) のパス
-    apply_head_correction : bool
-        頭部位置補正を適用するか
-    correction_method : str
-        補正方式
-    correction_factor_x : float
-        X軸補正係数
-    correction_factor_y : float
-        Y軸補正係数
-
-    Returns:
-    --------
-    list of dict
-        各セグメントの情報
-
-    .. deprecated::
-        Use readTobiiData(phase="training1") instead.
-    """
-    import os
-    import warnings
-    warnings.warn(
-        "readTobiiDataForTraining is deprecated. Use readTobiiData(phase='training1') instead.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-
-    # 対象イベントタイプ
-    event_types = [
-        'phase_intro_enter',
-        'question_screen_open',
-        'reflection1_open',
-        'training_explanation_open',
-        'analog_intro_enter',
-        'analog_question_open',
-        'analog_explanation_open',
-        'reflection2_open',
-        'phase_complete_enter'
-    ]
-
-    events = readEventLogMultiple(event_log_path, event_types)
-
-    gaze_csv = os.path.join(eye_tracking_dir, "tobii_pro_gaze.csv")
-    segments = segmentGazeDataForTraining(
-        gaze_csv, events,
-        apply_head_correction=apply_head_correction,
-        correction_method=correction_method,
-        correction_factor_x=correction_factor_x,
-        correction_factor_y=correction_factor_y
-    )
-
-    # 背景画像パスを追加
-    for segment in segments:
-        img_num = segment['image_number']
-        segment['image_path'] = os.path.join(eye_tracking_dir, f"{img_num}_back.png")
-
-    return segments
-
-
 def plotAOIWithGaze(image_path, aois, fixations, level="sentence",
                     save_path=None, figsize=(16, 9)):
     """
@@ -1728,13 +1572,25 @@ def plotAOIWithGaze(image_path, aois, fixations, level="sentence",
         if aoi['level'] != level:
             continue
 
-        bbox = aoi['bbox']
-        rect = patches.Rectangle(
-            (bbox['x'], bbox['y']), bbox['width'], bbox['height'],
-            linewidth=1, edgecolor=colors.get(level, 'gray'),
-            facecolor='none', alpha=0.7
-        )
-        ax.add_patch(rect)
+        color = colors.get(level, 'gray')
+
+        # multiline AOIの場合は各行を個別に描画
+        if aoi.get('is_multiline') and 'bboxes' in aoi:
+            for bbox in aoi['bboxes']:
+                rect = patches.Rectangle(
+                    (bbox['x'], bbox['y']), bbox['width'], bbox['height'],
+                    linewidth=1, edgecolor=color,
+                    facecolor='none', alpha=0.7
+                )
+                ax.add_patch(rect)
+        else:
+            bbox = aoi['bbox']
+            rect = patches.Rectangle(
+                (bbox['x'], bbox['y']), bbox['width'], bbox['height'],
+                linewidth=1, edgecolor=color,
+                facecolor='none', alpha=0.7
+            )
+            ax.add_patch(rect)
 
     # fixationを描画
     if isinstance(fixations, np.ndarray):
@@ -1760,3 +1616,1457 @@ def plotAOIWithGaze(image_path, aois, fixations, level="sentence",
         plt.close()
     else:
         plt.show()
+
+
+# =============================================================================
+# 全要素AOI抽出・AOI率計算
+# =============================================================================
+
+def _lines_to_bbox(lines):
+    """
+    lines配列からbboxを計算するヘルパー関数
+
+    Parameters:
+    -----------
+    lines : list of dict
+        [{x, y, width, height}, ...]
+
+    Returns:
+    --------
+    dict or None
+        {"x": min_x, "y": min_y, "width": w, "height": h} or None
+    """
+    if not lines:
+        return None
+    min_x = min(line['x'] for line in lines)
+    min_y = min(line['y'] for line in lines)
+    max_x = max(line['x'] + line['width'] for line in lines)
+    max_y = max(line['y'] + line['height'] for line in lines)
+    return {'x': min_x, 'y': min_y, 'width': max_x - min_x, 'height': max_y - min_y}
+
+
+def _lines_to_bboxes(lines):
+    """
+    lines配列から個別のbboxリストと包含bboxを計算するヘルパー関数
+
+    複数行にまたがるテキスト要素を正確に表現するため、
+    各行の個別bboxと、全行を包含するbbox（後方互換性用）を返す。
+
+    同じ視覚的行にある要素（例：丸数字①とテキスト本体）がある場合、
+    丸数字（widthが小さい方）は除外してテキスト本体のみを残す。
+
+    Parameters:
+    -----------
+    lines : list of dict
+        [{x, y, width, height}, ...]
+
+    Returns:
+    --------
+    tuple (bboxes, encompassing_bbox, is_multiline)
+        bboxes: list of dict - 各視覚的行のbbox（丸数字は除外）
+        encompassing_bbox: dict - 全行を包含するbbox (後方互換性用)
+        is_multiline: bool - 複数の視覚的行にまたがるかどうか
+    """
+    if not lines:
+        return None, None, False
+
+    # Y座標でソート
+    sorted_lines = sorted(lines, key=lambda l: l['y'])
+
+    # Y座標が重なっている行をグループ化
+    visual_lines = []
+    current_group = [sorted_lines[0]]
+
+    for line in sorted_lines[1:]:
+        # 現在のグループの最大Y（下端）を計算
+        group_max_y = max(l['y'] + l['height'] for l in current_group)
+        # 新しい行のY（上端）がグループの下端より小さければ重なっている
+        if line['y'] < group_max_y:
+            # 同じ視覚的行なのでグループに追加
+            current_group.append(line)
+        else:
+            # 新しい視覚的行を開始
+            visual_lines.append(current_group)
+            current_group = [line]
+    visual_lines.append(current_group)
+
+    # 各視覚的行のグループから、widthが最大のもの（テキスト本体）だけを採用
+    # （丸数字①はwidthが小さいので除外される）
+    bboxes = []
+    for group in visual_lines:
+        # widthが最大のlineを採用
+        main_line = max(group, key=lambda l: l['width'])
+        bboxes.append({
+            'x': main_line['x'],
+            'y': main_line['y'],
+            'width': main_line['width'],
+            'height': main_line['height']
+        })
+
+    # 包含bbox (フィルタリング後のbboxesから計算)
+    min_x = min(b['x'] for b in bboxes)
+    min_y = min(b['y'] for b in bboxes)
+    max_x = max(b['x'] + b['width'] for b in bboxes)
+    max_y = max(b['y'] + b['height'] for b in bboxes)
+    encompassing_bbox = {'x': min_x, 'y': min_y, 'width': max_x - min_x, 'height': max_y - min_y}
+
+    # 視覚的行が複数あるかどうか
+    is_multiline = len(visual_lines) > 1
+
+    return bboxes, encompassing_bbox, is_multiline
+
+
+def parseImageFilename(image_path):
+    """
+    画像ファイル名からAOI抽出パラメータを解析
+
+    Parameters:
+    -----------
+    image_path : str
+        画像ファイルのパス（例: '005_2_ja_back.png'）
+
+    Returns:
+    --------
+    dict or None
+        {
+            'image_num': '005',           # 画像番号
+            'target_locale': 'ja',        # 'en' or 'ja'
+            'target_question': 1,         # 0-indexed Q番号
+            'target_analog': 1,           # 0-indexed 類題番号
+        }
+        パターンにマッチしない場合はNone
+    """
+    import re
+    filename = os.path.basename(image_path)
+
+    # パターン: NNN[_N][_ja]_back.png
+    # NNN: 画像番号（3桁）
+    # _N: オプション。Q番号または類題番号（2, 3など）
+    # _ja: オプション。日本語の場合
+    pattern = r'^(\d{3})(?:_(\d))?(?:_(ja))?_back\.png$'
+    match = re.match(pattern, filename)
+
+    if not match:
+        return None
+
+    image_num = match.group(1)
+    variant_num = match.group(2)  # '2', '3', or None
+    lang = match.group(3)         # 'ja' or None
+
+    target_locale = 'ja' if lang == 'ja' else 'en'
+    # variant_numは0-indexedに変換（'2' -> 1, '3' -> 2）
+    # Noneの場合は0（デフォルト: Q1/類題1）
+    variant_index = int(variant_num) - 1 if variant_num else 0
+
+    return {
+        'image_num': image_num,
+        'target_locale': target_locale,
+        'target_question': variant_index,
+        'target_analog': variant_index,
+    }
+
+
+def extractAllAOIs(coordinates, levels=None,
+                   target_locale=None, target_question=None, target_analog=None):
+    """
+    座標JSONから全ての要素をAOIとして抽出
+
+    extractAOIs()と異なり、instruction, metadata, ui要素も含む
+    全てのページタイプ（intro, complete, question, explanation, reflection等）に対応
+
+    Parameters:
+    -----------
+    coordinates : dict
+        loadCoordinates()で読み込んだ座標データ
+    levels : list of str, optional
+        抽出するAOIレベルのリスト。Noneの場合は全レベルを抽出。
+        指定可能:
+        - 'instruction': 問題文の指示
+        - 'paragraph': 段落
+        - 'sentence': 文
+        - 'question': 設問
+        - 'choice': 選択肢
+        - 'timer': タイマー (ui_components内 or header内)
+        - 'ui': submit_button, confirm_button, button等
+        - 'header': locale_tabs, question_tabs, analog_tabs
+        - 'reflection': reflection_form
+        - 'title': passage title
+        - 'subtitle': passage subtitle (例: "By Erika Eaton")
+        - 'intro': intro/complete画面のtitle, description
+        - 'analog': analogs内の要素 (reflection2用)
+        - 'metadata': passage内のメタデータ (sender, time, date, recipient, subject等)
+        - 'table': テーブル要素 (headers, cells)
+        - 'explanation': 解説テキスト (training_explanation, analog_explanation画面)
+        - 'metacog': メタ認知フィードバック (B群のtraining_explanation画面)
+        例: levels=['instruction', 'sentence', 'question', 'choice', 'timer', 'ui']
+    target_locale : str, optional
+        抽出する言語。'en':英語のみ, 'ja':日本語のみ, None:自動判定
+        (explanation/reflection2ではデフォルトで英語のみ)
+    target_question : int, optional
+        抽出するQ番号（0-indexed）。None:自動判定
+        (explanation/reflection2ではデフォルトでQ1のみ)
+    target_analog : int, optional
+        抽出する類題番号（0-indexed）。None:自動判定
+        (explanation/reflection2ではデフォルトで類題1のみ)
+
+    Returns:
+    --------
+    list of dict
+        AOIリスト。各要素:
+        {
+            "id": "para_0_sent_1",
+            "level": "sentence",
+            "text": "...",
+            "bbox": {"x": 295, "y": 113, "width": 348, "height": 19}
+        }
+    """
+    # デフォルトは全レベル
+    if levels is None:
+        levels = ['instruction', 'paragraph', 'sentence', 'question', 'choice',
+                  'timer', 'ui', 'header', 'reflection', 'title', 'subtitle', 'intro', 'analog',
+                  'metadata', 'table', 'explanation', 'metacog']
+    aois = []
+    coords = coordinates.get('coordinates', coordinates)
+
+    # page_typeを取得（explanation/reflection2画面の判定用）
+    page_type = coords.get('page_type', '')
+    passage_id = coords.get('passage_id', '')
+    # explanation画面とreflection2画面はデフォルトで英語のみ、Q1のみ表示
+    is_en_only_page_default = 'explanation' in page_type or page_type == 'reflection2'
+    is_explanation = 'explanation' in page_type
+    is_reflection2 = page_type == 'reflection2'
+
+    # target_localeが指定された場合はそれを使用、なければデフォルト動作
+    if target_locale is not None:
+        include_en = (target_locale == 'en')
+        include_ja = (target_locale == 'ja')
+    elif is_en_only_page_default:
+        # explanation/reflection2画面でも、passages_jaがあれば日本語を優先
+        left_panel = coords.get('left_panel', {})
+        if left_panel.get('passages_ja'):
+            include_en = False
+            include_ja = True
+        else:
+            include_en = True
+            include_ja = False
+    else:
+        include_en = True
+        include_ja = True
+
+    # 後方互換性のため維持
+    is_en_only_page = not include_ja
+
+    # === ヘッダー ===
+    header = coords.get('header', {})
+
+    # locale_tabs (EN/JA切り替えタブ)
+    if 'header' in levels:
+        for tab in header.get('locale_tabs', []):
+            bbox = tab.get('bbox')
+            if bbox:
+                aois.append({
+                    'id': f"locale_tab_{tab.get('locale', '')}",
+                    'level': 'header',
+                    'text': tab.get('locale', ''),
+                    'bbox': bbox
+                })
+
+        # question_tabs (Q1/Q2切り替えタブ)
+        for tab in header.get('question_tabs', []):
+            bbox = tab.get('bbox')
+            if bbox:
+                aois.append({
+                    'id': f"question_tab_{tab.get('question_index', '')}",
+                    'level': 'header',
+                    'text': f"Q{tab.get('question_index', 0) + 1}",
+                    'bbox': bbox
+                })
+
+        # analog_tabs (類題切り替えタブ - reflection2で使用)
+        for tab in header.get('analog_tabs', []):
+            bbox = tab.get('bbox')
+            if bbox:
+                aois.append({
+                    'id': f"analog_tab_{tab.get('analog_index', '')}",
+                    'level': 'header',
+                    'text': f"An{tab.get('analog_index', 0) + 1}",
+                    'bbox': bbox
+                })
+
+    # header内のtimer (analog_questionで使用)
+    if 'timer' in levels:
+        header_timer = header.get('timer', {})
+        if header_timer:
+            if 'x' in header_timer and 'y' in header_timer:
+                bbox = header_timer
+            elif 'position' in header_timer:
+                bbox = header_timer['position']
+            else:
+                bbox = None
+            if bbox:
+                aois.append({
+                    'id': 'timer',
+                    'level': 'timer',
+                    'text': 'Timer',
+                    'bbox': bbox
+                })
+
+    # === トップレベル要素（intro/complete/analog_intro画面用）===
+    if 'intro' in levels:
+        # intro/complete画面のtitle
+        intro_title = coords.get('title', {})
+        if intro_title:
+            if 'lines' in intro_title:
+                bboxes, bbox, is_multiline = _lines_to_bboxes(intro_title['lines'])
+            elif 'x' in intro_title:
+                bbox = intro_title
+                bboxes = [bbox]
+                is_multiline = False
+            else:
+                bbox = None
+                bboxes = None
+                is_multiline = False
+            if bbox:
+                aois.append({
+                    'id': 'intro_title',
+                    'level': 'intro',
+                    'text': intro_title.get('text', 'Title')[:50],
+                    'bbox': bbox,
+                    'bboxes': bboxes,
+                    'is_multiline': is_multiline
+                })
+
+        # intro/complete画面のdescription
+        intro_desc = coords.get('description', {})
+        if intro_desc:
+            if 'lines' in intro_desc:
+                bboxes, bbox, is_multiline = _lines_to_bboxes(intro_desc['lines'])
+            elif 'x' in intro_desc:
+                bbox = intro_desc
+                bboxes = [bbox]
+                is_multiline = False
+            else:
+                bbox = None
+                bboxes = None
+                is_multiline = False
+            if bbox:
+                aois.append({
+                    'id': 'intro_description',
+                    'level': 'intro',
+                    'text': intro_desc.get('text', 'Description')[:50],
+                    'bbox': bbox,
+                    'bboxes': bboxes,
+                    'is_multiline': is_multiline
+                })
+
+    # intro/complete/analog_intro画面のbutton (uiレベルとして扱う)
+    if 'ui' in levels:
+        intro_button = coords.get('button', {})
+        if intro_button:
+            if 'x' in intro_button:
+                bbox = intro_button
+            else:
+                bbox = None
+            if bbox:
+                aois.append({
+                    'id': 'intro_button',
+                    'level': 'ui',
+                    'text': intro_button.get('text', 'Button')[:30],
+                    'bbox': bbox
+                })
+
+    # analog_intro画面のinstruction (トップレベル)
+    if 'instruction' in levels:
+        top_instruction = coords.get('instruction', {})
+        if top_instruction and 'left_panel' not in coords:  # left_panelがない場合のみ
+            if 'lines' in top_instruction:
+                bbox = _lines_to_bbox(top_instruction['lines'])
+            elif 'x' in top_instruction:
+                bbox = top_instruction
+            else:
+                bbox = None
+            if bbox:
+                aois.append({
+                    'id': 'instruction',
+                    'level': 'instruction',
+                    'text': top_instruction.get('text', '')[:50],
+                    'bbox': bbox
+                })
+
+    # === 左パネル ===
+    left_panel = coords.get('left_panel', {})
+
+    # instruction (通常版)
+    def extract_instruction(instr, suffix=''):
+        if instr and 'instruction' in levels:
+            if 'position' in instr:
+                bbox = instr['position']
+            elif 'lines' in instr:
+                bbox = _lines_to_bbox(instr['lines'])
+            else:
+                bbox = None
+            if bbox:
+                aois.append({
+                    'id': f'instruction{suffix}',
+                    'level': 'instruction',
+                    'text': instr.get('text', ''),
+                    'bbox': bbox
+                })
+
+    extract_instruction(left_panel.get('instruction'))
+    # 英語instructionの抽出（target_localeで制御）
+    if include_en:
+        extract_instruction(left_panel.get('instruction_en'), '_en')
+    # 日本語instructionの抽出（target_localeで制御）
+    if include_ja:
+        extract_instruction(left_panel.get('instruction_ja'), '_ja')
+
+    # passages内のparagraph, sentence, title, metadata
+    def extract_passages(passages, suffix=''):
+        for psg_idx, passage in enumerate(passages):
+            # passage metadata (sender, time, date, recipient, subject, etc.)
+            if 'metadata' in levels:
+                for m_idx, meta in enumerate(passage.get('metadata') or []):
+                    mtype = meta.get('metadata_type', 'unknown')
+
+                    # label部分のbbox（例: "From:", "To:", "Date:"など）
+                    label_lines = meta.get('label', [])
+                    if label_lines:
+                        bbox = _lines_to_bbox(label_lines)
+                        if bbox:
+                            aois.append({
+                                'id': f'psg_{psg_idx}_meta_{mtype}_label_{m_idx}{suffix}',
+                                'level': 'metadata',
+                                'text': meta.get('label_text', '')[:30],
+                                'bbox': bbox
+                            })
+
+                    # value部分のbbox（例: "Rex Martinez", "[10:16 A.M.]"など）
+                    value_lines = meta.get('value', [])
+                    if value_lines:
+                        bbox = _lines_to_bbox(value_lines)
+                        if bbox:
+                            aois.append({
+                                'id': f'psg_{psg_idx}_meta_{mtype}_{m_idx}{suffix}',
+                                'level': 'metadata',
+                                'text': meta.get('value_text', '')[:50],
+                                'bbox': bbox
+                            })
+
+            # passage title
+            title = passage.get('title', {})
+            if title and 'title' in levels:
+                if 'position' in title:
+                    bbox = title['position']
+                elif 'lines' in title:
+                    bbox = _lines_to_bbox(title['lines'])
+                else:
+                    bbox = None
+                if bbox:
+                    aois.append({
+                        'id': f'title_{psg_idx}{suffix}',
+                        'level': 'title',
+                        'text': title.get('text', '')[:50],
+                        'bbox': bbox
+                    })
+
+            # passage subtitle
+            subtitle = passage.get('subtitle', {})
+            if subtitle and 'subtitle' in levels:
+                if 'position' in subtitle:
+                    bbox = subtitle['position']
+                elif 'lines' in subtitle:
+                    bbox = _lines_to_bbox(subtitle['lines'])
+                else:
+                    bbox = None
+                if bbox:
+                    aois.append({
+                        'id': f'subtitle_{psg_idx}{suffix}',
+                        'level': 'subtitle',
+                        'text': subtitle.get('text', '')[:50],
+                        'bbox': bbox
+                    })
+
+            # passage table (headers and cells)
+            # passages_enにはtable（英語）とtableHidden（日本語）の両方がある
+            # suffixに応じて適切なtableを使用
+            if suffix == '_en':
+                table = passage.get('table')
+            elif suffix == '_ja':
+                # passages_jaにはtableがないので、passages_enのtableHiddenを使うことはできない
+                # この場合はスキップ（passages_enの処理でtableHiddenを出力する）
+                table = passage.get('table')  # passages_jaの場合はnullになる
+            else:
+                table = passage.get('table')
+            if table and 'table' in levels:
+                # table headers
+                for h_idx, header in enumerate(table.get('headers', [])):
+                    bbox = header.get('bbox')
+                    if bbox:
+                        aois.append({
+                            'id': f'table_{psg_idx}_header_{h_idx}{suffix}',
+                            'level': 'table',
+                            'text': header.get('text', '')[:30],
+                            'bbox': bbox
+                        })
+
+                # table cells
+                for cell in table.get('cells', []):
+                    row_idx = cell.get('row_index', 0)
+                    cell_idx = cell.get('cell_index', 0)
+                    bbox = cell.get('bbox')
+                    if bbox:
+                        aois.append({
+                            'id': f'table_{psg_idx}_cell_{row_idx}_{cell_idx}{suffix}',
+                            'level': 'table',
+                            'text': cell.get('text', '')[:30],
+                            'bbox': bbox
+                        })
+
+            # tableHidden（日本語版table）の処理 - passages_enにのみ存在
+            # include_jaがtrueで、suffix='_en'の場合のみ処理
+            tableHidden = passage.get('tableHidden')
+            if tableHidden and 'table' in levels and suffix == '_en' and include_ja:
+                for h_idx, header in enumerate(tableHidden.get('headers', [])):
+                    bbox = header.get('bbox')
+                    if bbox:
+                        aois.append({
+                            'id': f'table_{psg_idx}_header_{h_idx}_ja',
+                            'level': 'table',
+                            'text': header.get('text', '')[:30],
+                            'bbox': bbox
+                        })
+                for cell in tableHidden.get('cells', []):
+                    row_idx = cell.get('row_index', 0)
+                    cell_idx = cell.get('cell_index', 0)
+                    bbox = cell.get('bbox')
+                    if bbox:
+                        aois.append({
+                            'id': f'table_{psg_idx}_cell_{row_idx}_{cell_idx}_ja',
+                            'level': 'table',
+                            'text': cell.get('text', '')[:30],
+                            'bbox': bbox
+                        })
+
+            for p_idx, para in enumerate(passage.get('paragraphs', [])):
+                # paragraph の bbox
+                if 'position' in para:
+                    bbox = para['position']
+                    bboxes = [bbox]
+                    is_multiline = False
+                elif 'lines' in para:
+                    bboxes, bbox, is_multiline = _lines_to_bboxes(para['lines'])
+                else:
+                    bbox = None
+                    bboxes = None
+                    is_multiline = False
+                if bbox and 'paragraph' in levels:
+                    aois.append({
+                        'id': f'psg_{psg_idx}_para_{p_idx}{suffix}',
+                        'level': 'paragraph',
+                        'text': para.get('text', '')[:50],
+                        'bbox': bbox,
+                        'bboxes': bboxes,
+                        'is_multiline': is_multiline
+                    })
+
+                # sentence の bbox
+                for s_idx, sent in enumerate(para.get('sentences', [])):
+                    if 'position' in sent:
+                        bbox = sent['position']
+                        bboxes = [bbox]
+                        is_multiline = False
+                    elif 'lines' in sent:
+                        bboxes, bbox, is_multiline = _lines_to_bboxes(sent['lines'])
+                    else:
+                        bbox = None
+                        bboxes = None
+                        is_multiline = False
+                    if bbox and 'sentence' in levels:
+                        aois.append({
+                            'id': f'psg_{psg_idx}_para_{p_idx}_sent_{s_idx}{suffix}',
+                            'level': 'sentence',
+                            'text': sent.get('text', '')[:50],
+                            'bbox': bbox,
+                            'bboxes': bboxes,
+                            'is_multiline': is_multiline
+                        })
+
+    extract_passages(left_panel.get('passages', []))
+    # 英語passagesの抽出（target_localeで制御）
+    if include_en:
+        extract_passages(left_panel.get('passages_en', []), '_en')
+    # 日本語passagesの抽出（target_localeで制御）
+    if include_ja:
+        extract_passages(left_panel.get('passages_ja', []), '_ja')
+
+    # 日本語モードでpassages_enのtableHiddenを処理（tableHiddenはpassages_enにのみ存在）
+    if include_ja and not include_en and 'table' in levels:
+        for psg_idx, passage in enumerate(left_panel.get('passages_en', [])):
+            tableHidden = passage.get('tableHidden')
+            if tableHidden:
+                for h_idx, header in enumerate(tableHidden.get('headers', [])):
+                    bbox = header.get('bbox')
+                    if bbox:
+                        aois.append({
+                            'id': f'table_{psg_idx}_header_{h_idx}_ja',
+                            'level': 'table',
+                            'text': header.get('text', '')[:30],
+                            'bbox': bbox
+                        })
+                for cell in tableHidden.get('cells', []):
+                    row_idx = cell.get('row_index', 0)
+                    cell_idx = cell.get('cell_index', 0)
+                    bbox = cell.get('bbox')
+                    if bbox:
+                        aois.append({
+                            'id': f'table_{psg_idx}_cell_{row_idx}_{cell_idx}_ja',
+                            'level': 'table',
+                            'text': cell.get('text', '')[:30],
+                            'bbox': bbox
+                        })
+
+    # === 左パネルのanalogs (reflection2で使用) ===
+    if 'analog' in levels:
+        # analogsの抽出（explanation/reflection2ページでのみtarget_analogで制限）
+        analogs_list = left_panel.get('analogs', [])
+        analogs_to_process = []
+        if is_en_only_page_default:
+            # explanation/reflection2ページでのみ制限を適用
+            if target_analog is not None:
+                # 特定の類題のみ抽出（インデックスを保持）
+                if target_analog < len(analogs_list):
+                    analogs_to_process = [(target_analog, analogs_list[target_analog])]
+                else:
+                    analogs_to_process = []
+            else:
+                # デフォルト動作: 類題1のみ（インデックスを保持）
+                if analogs_list:
+                    analogs_to_process = [(0, analogs_list[0])]
+        else:
+            # 他のページでは全analogsを抽出（インデックスを保持）
+            analogs_to_process = list(enumerate(analogs_list))
+
+        for an_idx, analog in analogs_to_process:
+            # analog内のinstruction（reflection2で使用）
+            if 'instruction' in levels:
+                if include_en:
+                    instr_en = analog.get('instruction_en')
+                    if instr_en:
+                        if 'lines' in instr_en:
+                            bbox = _lines_to_bbox(instr_en['lines'])
+                        else:
+                            bbox = None
+                        if bbox:
+                            aois.append({
+                                'id': f'analog_{an_idx}_instruction_en',
+                                'level': 'instruction',
+                                'text': instr_en.get('text', '')[:50],
+                                'bbox': bbox
+                            })
+                if include_ja:
+                    instr_ja = analog.get('instruction_ja')
+                    if instr_ja:
+                        if 'lines' in instr_ja:
+                            bbox = _lines_to_bbox(instr_ja['lines'])
+                        else:
+                            bbox = None
+                        if bbox:
+                            aois.append({
+                                'id': f'analog_{an_idx}_instruction_ja',
+                                'level': 'instruction',
+                                'text': instr_ja.get('text', '')[:50],
+                                'bbox': bbox
+                            })
+
+            # analogs内のpassages_en/passages_ja（target_localeで制御）
+            passages_keys = []
+            if include_en:
+                passages_keys.append('passages_en')
+            if include_ja:
+                passages_keys.append('passages_ja')
+            for passages_key in passages_keys:
+                suffix = '_en' if 'en' in passages_key else '_ja'
+                for psg_idx, passage in enumerate(analog.get(passages_key, [])):
+                    # passage metadata
+                    if 'metadata' in levels:
+                        for m_idx, meta in enumerate(passage.get('metadata') or []):
+                            mtype = meta.get('metadata_type', 'unknown')
+                            label_lines = meta.get('label', [])
+                            if label_lines:
+                                bbox = _lines_to_bbox(label_lines)
+                                if bbox:
+                                    aois.append({
+                                        'id': f'analog_{an_idx}_psg_{psg_idx}_meta_{mtype}_label_{m_idx}{suffix}',
+                                        'level': 'metadata',
+                                        'text': meta.get('label_text', '')[:30],
+                                        'bbox': bbox
+                                    })
+                            value_lines = meta.get('value', [])
+                            if value_lines:
+                                bbox = _lines_to_bbox(value_lines)
+                                if bbox:
+                                    aois.append({
+                                        'id': f'analog_{an_idx}_psg_{psg_idx}_meta_{mtype}_{m_idx}{suffix}',
+                                        'level': 'metadata',
+                                        'text': meta.get('value_text', '')[:50],
+                                        'bbox': bbox
+                                    })
+
+                    # passage title
+                    title = passage.get('title', {})
+                    if title and 'title' in levels:
+                        if 'position' in title:
+                            bbox = title['position']
+                        elif 'lines' in title:
+                            bbox = _lines_to_bbox(title['lines'])
+                        else:
+                            bbox = None
+                        if bbox:
+                            aois.append({
+                                'id': f'analog_{an_idx}_title_{psg_idx}{suffix}',
+                                'level': 'title',
+                                'text': title.get('text', '')[:50],
+                                'bbox': bbox
+                            })
+
+                    # passage subtitle
+                    subtitle = passage.get('subtitle', {})
+                    if subtitle and 'subtitle' in levels:
+                        if 'position' in subtitle:
+                            bbox = subtitle['position']
+                        elif 'lines' in subtitle:
+                            bbox = _lines_to_bbox(subtitle['lines'])
+                        else:
+                            bbox = None
+                        if bbox:
+                            aois.append({
+                                'id': f'analog_{an_idx}_subtitle_{psg_idx}{suffix}',
+                                'level': 'subtitle',
+                                'text': subtitle.get('text', '')[:50],
+                                'bbox': bbox
+                            })
+
+                    # passage table
+                    table = passage.get('table')
+                    if table and 'table' in levels:
+                        for h_idx, header in enumerate(table.get('headers', [])):
+                            bbox = header.get('bbox')
+                            if bbox:
+                                aois.append({
+                                    'id': f'analog_{an_idx}_table_{psg_idx}_header_{h_idx}{suffix}',
+                                    'level': 'table',
+                                    'text': header.get('text', '')[:30],
+                                    'bbox': bbox
+                                })
+                        for cell in table.get('cells', []):
+                            row_idx = cell.get('row_index', 0)
+                            cell_idx = cell.get('cell_index', 0)
+                            bbox = cell.get('bbox')
+                            if bbox:
+                                aois.append({
+                                    'id': f'analog_{an_idx}_table_{psg_idx}_cell_{row_idx}_{cell_idx}{suffix}',
+                                    'level': 'table',
+                                    'text': cell.get('text', '')[:30],
+                                    'bbox': bbox
+                                })
+
+                    # tableHidden（日本語版table）の処理
+                    tableHidden = passage.get('tableHidden')
+                    if tableHidden and 'table' in levels and suffix == '_en' and include_ja:
+                        for h_idx, header in enumerate(tableHidden.get('headers', [])):
+                            bbox = header.get('bbox')
+                            if bbox:
+                                aois.append({
+                                    'id': f'analog_{an_idx}_table_{psg_idx}_header_{h_idx}_ja',
+                                    'level': 'table',
+                                    'text': header.get('text', '')[:30],
+                                    'bbox': bbox
+                                })
+                        for cell in tableHidden.get('cells', []):
+                            row_idx = cell.get('row_index', 0)
+                            cell_idx = cell.get('cell_index', 0)
+                            bbox = cell.get('bbox')
+                            if bbox:
+                                aois.append({
+                                    'id': f'analog_{an_idx}_table_{psg_idx}_cell_{row_idx}_{cell_idx}_ja',
+                                    'level': 'table',
+                                    'text': cell.get('text', '')[:30],
+                                    'bbox': bbox
+                                })
+
+                    # paragraphs（sentenceも含めて処理するため、paragraph or sentenceレベルが必要な場合に実行）
+                    if 'paragraph' in levels or 'sentence' in levels:
+                        for p_idx, para in enumerate(passage.get('paragraphs', [])):
+                            # paragraph AOIの追加（paragraphレベルが指定されている場合のみ）
+                            if 'paragraph' in levels:
+                                if 'position' in para:
+                                    bbox = para['position']
+                                    bboxes = [bbox]
+                                    is_multiline = False
+                                elif 'lines' in para:
+                                    bboxes, bbox, is_multiline = _lines_to_bboxes(para['lines'])
+                                else:
+                                    bbox = None
+                                    bboxes = None
+                                    is_multiline = False
+                                if bbox:
+                                    aois.append({
+                                        'id': f'analog_{an_idx}_psg_{psg_idx}_para_{p_idx}{suffix}',
+                                        'level': 'paragraph',
+                                        'text': para.get('text', '')[:50],
+                                        'bbox': bbox,
+                                        'bboxes': bboxes,
+                                        'is_multiline': is_multiline
+                                    })
+
+                            # sentences
+                            if 'sentence' in levels:
+                                for s_idx, sent in enumerate(para.get('sentences', [])):
+                                    if 'position' in sent:
+                                        bbox = sent['position']
+                                        bboxes = [bbox]
+                                        is_multiline = False
+                                    elif 'lines' in sent:
+                                        bboxes, bbox, is_multiline = _lines_to_bboxes(sent['lines'])
+                                    else:
+                                        bbox = None
+                                        bboxes = None
+                                        is_multiline = False
+                                    if bbox:
+                                        aois.append({
+                                            'id': f'analog_{an_idx}_psg_{psg_idx}_para_{p_idx}_sent_{s_idx}{suffix}',
+                                            'level': 'sentence',
+                                            'text': sent.get('text', '')[:50],
+                                            'bbox': bbox,
+                                            'bboxes': bboxes,
+                                            'is_multiline': is_multiline
+                                        })
+
+    # === 右パネル ===
+    right_panel = coords.get('right_panel', {})
+
+    # questions, choices（explanationページのみtarget_questionで制限、reflection2は全Q表示）
+    questions_list = right_panel.get('questions', [])
+    questions_to_process = []
+    if is_explanation:
+        # explanationページでのみQ制限を適用
+        if target_question is not None:
+            # 特定のQのみ抽出（インデックスを保持）
+            if target_question < len(questions_list):
+                questions_to_process = [(target_question, questions_list[target_question])]
+            else:
+                questions_to_process = []
+        else:
+            # デフォルト動作: Q1のみ（インデックスを保持）
+            if questions_list:
+                questions_to_process = [(0, questions_list[0])]
+    else:
+        # reflection2/pre/postなど他のページでは全questionsを抽出（インデックスを保持）
+        questions_to_process = list(enumerate(questions_list))
+
+    # training2の類題2,3(tr_02_an2, tr_02_an3)判定用
+    analog_id = coords.get('analog_id', '')
+
+    for q_idx, question in questions_to_process:
+        # question の bbox
+        # explanation画面ではquestion_text_en/question_text_jaが使用される（target_localeで制御）
+        # pre/post画面ではquestion_textまたはpositionを使用
+
+        # 共通のposition（全言語で同じ位置を使う場合）
+        if 'position' in question:
+            common_bbox = question['position']
+            common_bboxes = [common_bbox]
+            common_is_multiline = False
+        elif 'question_bbox' in question:
+            common_bbox = question['question_bbox']
+            common_bboxes = [common_bbox]
+            common_is_multiline = False
+        else:
+            common_bbox = None
+            common_bboxes = None
+            common_is_multiline = False
+
+        # question_text_en（英語設問テキスト）
+        q_text_en = question.get('question_text_en', {})
+        if include_en and q_text_en and 'question' in levels:
+            if 'lines' in q_text_en:
+                bboxes, bbox, is_multiline = _lines_to_bboxes(q_text_en['lines'])
+            elif common_bbox:
+                bbox, bboxes, is_multiline = common_bbox, common_bboxes, common_is_multiline
+            else:
+                bbox = None
+            if bbox:
+                aois.append({
+                    'id': f'question_{q_idx}_en',
+                    'level': 'question',
+                    'text': q_text_en.get('text', '')[:50],
+                    'bbox': bbox,
+                    'bboxes': bboxes,
+                    'is_multiline': is_multiline
+                })
+
+        # question_text_ja（日本語設問テキスト）
+        q_text_ja = question.get('question_text_ja', {})
+        if include_ja and q_text_ja and 'question' in levels:
+            if 'lines' in q_text_ja:
+                bboxes, bbox, is_multiline = _lines_to_bboxes(q_text_ja['lines'])
+            elif common_bbox:
+                bbox, bboxes, is_multiline = common_bbox, common_bboxes, common_is_multiline
+            else:
+                bbox = None
+            if bbox:
+                aois.append({
+                    'id': f'question_{q_idx}_ja',
+                    'level': 'question',
+                    'text': q_text_ja.get('text', '')[:50],
+                    'bbox': bbox,
+                    'bboxes': bboxes,
+                    'is_multiline': is_multiline
+                })
+
+        # question_text（言語なしのフォールバック、pre/postなど）
+        q_text = question.get('question_text', {})
+        if not q_text_en and not q_text_ja and q_text and 'question' in levels:
+            if 'lines' in q_text:
+                bboxes, bbox, is_multiline = _lines_to_bboxes(q_text['lines'])
+            elif common_bbox:
+                bbox, bboxes, is_multiline = common_bbox, common_bboxes, common_is_multiline
+            else:
+                bbox = None
+            if bbox:
+                aois.append({
+                    'id': f'question_{q_idx}',
+                    'level': 'question',
+                    'text': q_text.get('text', question.get('text', ''))[:50],
+                    'bbox': bbox,
+                    'bboxes': bboxes,
+                    'is_multiline': is_multiline
+                })
+
+        # choices の bbox（choice_bboxを使用）
+        for c_idx, choice in enumerate(question.get('choices', [])):
+            if 'choice_bbox' in choice:
+                bbox = dict(choice['choice_bbox'])  # コピーを作成
+            elif 'bbox' in choice:
+                bbox = dict(choice['bbox'])
+            elif 'position' in choice:
+                bbox = dict(choice['position'])
+            else:
+                bbox = None
+
+            # training2の類題2(tr_02_an2)の解説画面のQ2で、日本語モードの場合のみy座標を20上にずらす
+            # （英語Q2は設問が2行、日本語Q2は1行のため、選択肢位置がずれる）
+            if (bbox and include_ja and not include_en
+                and is_explanation and analog_id in ('tr_02_an2', 'tr_02_an3') and q_idx == 1):
+                bbox['y'] = bbox['y'] - 20
+
+            if bbox and 'choice' in levels:
+                aois.append({
+                    'id': f'question_{q_idx}_choice_{c_idx}',
+                    'level': 'choice',
+                    'text': choice.get('choice_text_en', {}).get('text', choice.get('text', ''))[:50],
+                    'bbox': bbox
+                })
+
+        # explanation (training_explanation, analog_explanation画面)
+        if 'explanation' in levels:
+            explanation = question.get('explanation', {})
+            if explanation and 'lines' in explanation:
+                bbox = _lines_to_bbox(explanation['lines'])
+                if bbox:
+                    # training2の類題2(tr_02_an2)の解説画面のQ2で、日本語モードの場合のみy座標を20上にずらす
+                    if (include_ja and not include_en
+                        and is_explanation and analog_id in ('tr_02_an2', 'tr_02_an3') and q_idx == 1):
+                        bbox = dict(bbox)
+                        bbox['y'] = bbox['y'] - 20
+                    aois.append({
+                        'id': f'question_{q_idx}_explanation',
+                        'level': 'explanation',
+                        'text': explanation.get('text', '')[:50],
+                        'bbox': bbox
+                    })
+
+        # metacog_feedback (メタ認知フィードバック - B群のtraining_explanation画面)
+        if 'metacog' in levels:
+            metacog = question.get('metacog_feedback', {})
+            if metacog and 'lines' in metacog:
+                bbox = _lines_to_bbox(metacog['lines'])
+                if bbox:
+                    # training2の類題2(tr_02_an2)の解説画面のQ2で、日本語モードの場合のみy座標を20上にずらす
+                    if (include_ja and not include_en
+                        and is_explanation and analog_id in ('tr_02_an2', 'tr_02_an3') and q_idx == 1):
+                        bbox = dict(bbox)
+                        bbox['y'] = bbox['y'] - 20
+                    aois.append({
+                        'id': f'question_{q_idx}_metacog',
+                        'level': 'metacog',
+                        'text': metacog.get('text', '')[:50],
+                        'bbox': bbox
+                    })
+
+    # ui_components内のtimer
+    ui_components = right_panel.get('ui_components', {})
+    timer = ui_components.get('timer', {})
+    if timer and 'timer' in levels:
+        # 直接座標が入っている場合
+        if 'x' in timer and 'y' in timer:
+            bbox = timer
+        elif 'position' in timer:
+            bbox = timer['position']
+        elif 'lines' in timer:
+            bbox = _lines_to_bbox(timer['lines'])
+        else:
+            bbox = None
+        if bbox:
+            aois.append({
+                'id': 'timer',
+                'level': 'timer',
+                'text': 'Timer',
+                'bbox': bbox
+            })
+
+    # reflection_form（right_panel直下、またはanalogs内から取得）
+    reflection_form = right_panel.get('reflection_form', {})
+    reflection_form_analog_id = ''
+
+    # right_panel直下にない場合、analogs内から取得を試みる
+    if not reflection_form:
+        rp_analogs_temp = right_panel.get('analogs', [])
+        if rp_analogs_temp:
+            # target_analogが指定されていればそれを使用、なければ最初のanalogを使用
+            target_idx = target_analog if target_analog is not None and target_analog < len(rp_analogs_temp) else 0
+            if target_idx < len(rp_analogs_temp):
+                reflection_form = rp_analogs_temp[target_idx].get('reflection_form', {})
+                reflection_form_analog_id = rp_analogs_temp[target_idx].get('analog_id', '')
+
+    # training2のreflection2の類題2,3で日本語モードの場合、-20オフセット適用
+    is_reflection_form_tr02_an2_ja = (is_reflection2 and passage_id == 'tr_02'
+                                      and reflection_form_analog_id in ('tr_02_an2', 'tr_02_an3')
+                                      and include_ja and not include_en)
+
+    if reflection_form and 'reflection' in levels:
+        # prompt
+        prompt = reflection_form.get('prompt', {})
+        if prompt:
+            if 'lines' in prompt:
+                bbox = _lines_to_bbox(prompt['lines'])
+            elif 'position' in prompt:
+                bbox = prompt['position']
+            else:
+                bbox = None
+            if bbox:
+                # training2のreflection2の類題2で日本語モードは-20オフセット
+                if is_reflection_form_tr02_an2_ja:
+                    bbox = dict(bbox)
+                    bbox['y'] = bbox['y'] - 20
+                aois.append({
+                    'id': 'reflection_prompt',
+                    'level': 'reflection',
+                    'text': prompt.get('text', '')[:50],
+                    'bbox': bbox
+                })
+
+        # textarea
+        textarea = reflection_form.get('textarea', {})
+        if textarea and 'x' in textarea:
+            # training2のreflection2の類題2で日本語モードは-20オフセット
+            if is_reflection_form_tr02_an2_ja:
+                textarea = dict(textarea)
+                textarea['y'] = textarea['y'] - 20
+            aois.append({
+                'id': 'reflection_textarea',
+                'level': 'reflection',
+                'text': 'textarea',
+                'bbox': textarea
+            })
+
+    # === 右パネルのanalogs (reflection2で使用) ===
+    # reflection2画面: 類題1のみ、Q1-3すべて、英語のみ（デフォルト）
+    # explanation画面: 類題1のみ、Q1のみ、英語のみ（デフォルト）
+    rp_analogs_list = right_panel.get('analogs', [])
+    rp_analogs_to_process = []
+    if is_en_only_page_default:
+        # explanation/reflection2ページでのみ制限を適用
+        if target_analog is not None:
+            # 特定の類題のみ抽出（インデックスを保持）
+            if target_analog < len(rp_analogs_list):
+                rp_analogs_to_process = [(target_analog, rp_analogs_list[target_analog])]
+            else:
+                rp_analogs_to_process = []
+        else:
+            # デフォルト動作: 類題1のみ（インデックスを保持）
+            if rp_analogs_list:
+                rp_analogs_to_process = [(0, rp_analogs_list[0])]
+    else:
+        # 他のページでは全analogsを抽出（インデックスを保持）
+        rp_analogs_to_process = list(enumerate(rp_analogs_list))
+
+    for an_idx, analog in rp_analogs_to_process:
+        # training2のreflection2の類題2,3(tr_02_an2, tr_02_an3)で日本語モードの場合、Q2以降に-20オフセット適用
+        rp_analog_id = analog.get('analog_id', '')
+        is_tr02_an2_ja = (is_reflection2 and passage_id == 'tr_02'
+                         and rp_analog_id in ('tr_02_an2', 'tr_02_an3')
+                         and include_ja and not include_en)
+
+        # analogs内のquestions（explanationページのみtarget_questionで制限、reflection2は全Q表示）
+        questions_list = analog.get('questions', [])
+        questions_to_process = []
+        if is_explanation:
+            # explanationページでのみQ制限を適用
+            if target_question is not None:
+                # 特定のQのみ抽出（インデックスを保持）
+                if target_question < len(questions_list):
+                    questions_to_process = [(target_question, questions_list[target_question])]
+                else:
+                    questions_to_process = []
+            else:
+                # デフォルト動作: Q1のみ（インデックスを保持）
+                if questions_list:
+                    questions_to_process = [(0, questions_list[0])]
+        else:
+            # reflection2/他のページではQ1-3すべて（制限なし、インデックスを保持）
+            questions_to_process = list(enumerate(questions_list))
+
+        for q_idx, question in questions_to_process:
+            # 多言語対応
+            q_text_en = question.get('question_text_en', {})
+            q_text_ja = question.get('question_text_ja', {})
+
+            # question_text_en
+            # question_text_en（target_localeで制御）
+            if q_text_en and include_en and 'question' in levels:
+                if 'lines' in q_text_en:
+                    bboxes, bbox, is_multiline = _lines_to_bboxes(q_text_en['lines'])
+                else:
+                    bbox = None
+                    bboxes = None
+                    is_multiline = False
+                if bbox:
+                    aois.append({
+                        'id': f'analog_{an_idx}_question_{q_idx}_en',
+                        'level': 'question',
+                        'text': q_text_en.get('text', '')[:50],
+                        'bbox': bbox,
+                        'bboxes': bboxes,
+                        'is_multiline': is_multiline
+                    })
+
+            # question_text_ja（target_localeで制御）
+            if q_text_ja and include_ja and 'question' in levels:
+                if 'lines' in q_text_ja:
+                    bboxes, bbox, is_multiline = _lines_to_bboxes(q_text_ja['lines'])
+                else:
+                    bbox = None
+                    bboxes = None
+                    is_multiline = False
+                if bbox:
+                    # training2のreflection2の類題2でQ3以降は-20オフセット（設問文）
+                    if is_tr02_an2_ja and q_idx >= 2:
+                        bbox = dict(bbox)
+                        bbox['y'] = bbox['y'] - 20
+                        # multilineの場合、各行のbboxも修正
+                        if bboxes:
+                            bboxes = [dict(b) for b in bboxes]
+                            for b in bboxes:
+                                b['y'] = b['y'] - 20
+                    aois.append({
+                        'id': f'analog_{an_idx}_question_{q_idx}_ja',
+                        'level': 'question',
+                        'text': q_text_ja.get('text', '')[:50],
+                        'bbox': bbox,
+                        'bboxes': bboxes,
+                        'is_multiline': is_multiline
+                    })
+
+            # choices
+            if 'choice' in levels:
+                for c_idx, choice in enumerate(question.get('choices', [])):
+                    # bboxがある場合はそれを使用
+                    choice_bbox = choice.get('bbox')
+                    if choice_bbox:
+                        # training2のreflection2の類題2でQ2以降は-20オフセット
+                        if is_tr02_an2_ja and q_idx >= 1:
+                            choice_bbox = dict(choice_bbox)
+                            choice_bbox['y'] = choice_bbox['y'] - 20
+                        aois.append({
+                            'id': f'analog_{an_idx}_question_{q_idx}_choice_{c_idx}',
+                            'level': 'choice',
+                            'text': choice.get('choice_text_en', {}).get('text', '')[:50],
+                            'bbox': choice_bbox
+                        })
+                    else:
+                        # bboxがない場合はchoice_text_en/jaから抽出
+                        choice_text_en = choice.get('choice_text_en', {})
+                        choice_text_ja = choice.get('choice_text_ja', {})
+                        choice_text = choice.get('choice_text', {})
+
+                        # target_localeで言語を制御
+                        langs_to_process = []
+                        if include_en:
+                            langs_to_process.append(('en', choice_text_en))
+                        if include_ja:
+                            langs_to_process.append(('ja', choice_text_ja))
+                        langs_to_process.append(('', choice_text))  # フォールバック用
+
+                        for lang, ct in langs_to_process:
+                            if ct and 'lines' in ct:
+                                bbox = _lines_to_bbox(ct['lines'])
+                                # training2のreflection2の類題2でQ2以降は-20オフセット
+                                if is_tr02_an2_ja and q_idx >= 1:
+                                    bbox = dict(bbox)
+                                    bbox['y'] = bbox['y'] - 20
+                                suffix = f'_{lang}' if lang else ''
+                                aois.append({
+                                    'id': f'analog_{an_idx}_question_{q_idx}_choice_{c_idx}{suffix}',
+                                    'level': 'choice',
+                                    'text': ct.get('text', '')[:50],
+                                    'bbox': bbox
+                                })
+
+    # === メタデータ (旧形式対応) ===
+    metadata = coords.get('metadata', {})
+    old_timer = metadata.get('timer', {})
+    if old_timer and 'timer' in levels:
+        if 'position' in old_timer:
+            bbox = old_timer['position']
+        elif 'lines' in old_timer:
+            bbox = _lines_to_bbox(old_timer['lines'])
+        elif 'x' in old_timer:
+            bbox = old_timer
+        else:
+            bbox = None
+        if bbox:
+            # 重複チェック
+            if not any(a['id'] == 'timer' for a in aois):
+                aois.append({
+                    'id': 'timer',
+                    'level': 'timer',
+                    'text': 'Timer',
+                    'bbox': bbox
+                })
+
+    # === フッター ===
+    footer = coords.get('footer', {})
+
+    # submit_button
+    submit_button = footer.get('submit_button', {})
+    if submit_button and 'ui' in levels:
+        if 'position' in submit_button:
+            bbox = submit_button['position']
+        elif 'lines' in submit_button:
+            bbox = _lines_to_bbox(submit_button['lines'])
+        elif 'x' in submit_button and 'y' in submit_button:
+            bbox = submit_button
+        else:
+            bbox = None
+        if bbox:
+            aois.append({
+                'id': 'submit_button',
+                'level': 'ui',
+                'text': submit_button.get('text', 'Submit'),
+                'bbox': bbox
+            })
+
+    # confirm_button (analog_questionで使用)
+    confirm_button = footer.get('confirm_button', {})
+    if confirm_button and 'ui' in levels:
+        if 'x' in confirm_button and 'y' in confirm_button:
+            bbox = confirm_button
+        else:
+            bbox = None
+        if bbox:
+            aois.append({
+                'id': 'confirm_button',
+                'level': 'ui',
+                'text': confirm_button.get('text', 'Confirm'),
+                'bbox': bbox
+            })
+
+    return aois
+
+
+def computeAllAOIRate(fixations, aois):
+    """
+    全AOIを対象にFixationのAOI内率を計算
+
+    Parameters:
+    -----------
+    fixations : np.ndarray
+        Fixationデータ (N, 8)。[:, 1]がX座標、[:, 2]がY座標
+    aois : list of dict
+        extractAllAOIs()で抽出したAOIリスト
+
+    Returns:
+    --------
+    dict
+        {
+            "rate": 0.567,           # AOI内率（0〜1）
+            "fixations_in_aoi": 250, # AOI内のFixation数
+            "total_fixations": 441   # 全Fixation数
+        }
+    """
+    if len(fixations) == 0:
+        return {"rate": 0.0, "fixations_in_aoi": 0, "total_fixations": 0}
+
+    in_aoi = 0
+    for fix in fixations:
+        x, y = fix[1], fix[2]
+        for aoi in aois:
+            # multiline AOIの場合は個別bboxをチェック
+            if aoi.get('is_multiline') and 'bboxes' in aoi:
+                if _point_in_bboxes(x, y, aoi['bboxes']):
+                    in_aoi += 1
+                    break
+            else:
+                bbox = aoi['bbox']
+                if (bbox['x'] <= x <= bbox['x'] + bbox['width'] and
+                    bbox['y'] <= y <= bbox['y'] + bbox['height']):
+                    in_aoi += 1
+                    break
+
+    return {
+        "rate": in_aoi / len(fixations),
+        "fixations_in_aoi": in_aoi,
+        "total_fixations": len(fixations)
+    }
+
+
+# =============================================================================
+# 視線補正（スケーリング + オフセット）
+# =============================================================================
+
+def applyScalingAndOffset(fixations, scale_x=1.0, scale_y=1.0,
+                          offset_x=0, offset_y=0,
+                          center_x=960, center_y=540):
+    """
+    スケーリングとオフセットを視線座標に適用
+
+    変換式:
+    x' = scale_x * (x - center_x) + center_x + offset_x
+    y' = scale_y * (y - center_y) + center_y + offset_y
+
+    Parameters:
+    -----------
+    fixations : np.ndarray
+        Fixationデータ (N, 8)。[:, 1]がX座標、[:, 2]がY座標
+    scale_x, scale_y : float
+        X/Y方向のスケーリング係数（1.0=等倍）
+    offset_x, offset_y : float
+        X/Y方向のオフセット（ピクセル）
+    center_x, center_y : float
+        スケーリングの基準点（通常は画面中心）
+
+    Returns:
+    --------
+    np.ndarray
+        補正後のFixationデータ
+    """
+    corrected = fixations.copy()
+    corrected[:, 1] = scale_x * (fixations[:, 1] - center_x) + center_x + offset_x
+    corrected[:, 2] = scale_y * (fixations[:, 2] - center_y) + center_y + offset_y
+    return corrected
+
+
+def estimateOffsetWithScaling(fixations, aois,
+                               search_range_x=(-30, 30),
+                               search_range_y=(-50, 50),
+                               scale_range=(0.90, 1.10),
+                               offset_step=10,
+                               scale_step=0.02,
+                               center_x=960, center_y=540,
+                               verbose=True):
+    """
+    スケーリング + オフセットの最適パラメータをグリッドサーチで推定
+
+    Parameters:
+    -----------
+    fixations : np.ndarray
+        Fixationデータ (N, 8)
+    aois : list of dict
+        AOIリスト
+    search_range_x, search_range_y : tuple
+        オフセットの探索範囲 (min, max) ピクセル
+    scale_range : tuple
+        スケーリングの探索範囲 (min, max)
+    offset_step : int
+        オフセットの探索刻み幅（ピクセル）
+    scale_step : float
+        スケーリングの探索刻み幅
+    center_x, center_y : float
+        スケーリングの基準点
+    verbose : bool
+        進捗表示するか
+
+    Returns:
+    --------
+    dict
+        {
+            "best_offset_x": float,
+            "best_offset_y": float,
+            "best_scale_x": float,
+            "best_scale_y": float,
+            "best_rate": float,
+            "search_results": list  # (offset_x, offset_y, scale_x, scale_y, rate)
+        }
+    """
+    if len(fixations) == 0:
+        return {
+            "best_offset_x": 0.0,
+            "best_offset_y": 0.0,
+            "best_scale_x": 1.0,
+            "best_scale_y": 1.0,
+            "best_rate": 0.0,
+            "search_results": []
+        }
+
+    results = []
+    best_rate = 0.0
+    best_params = (0, 0, 1.0, 1.0)
+
+    # スケーリング値のリスト
+    scale_values = np.arange(scale_range[0], scale_range[1] + scale_step, scale_step)
+    offset_x_values = range(search_range_x[0], search_range_x[1] + 1, offset_step)
+    offset_y_values = range(search_range_y[0], search_range_y[1] + 1, offset_step)
+
+    total_iterations = len(scale_values) * len(scale_values) * len(offset_x_values) * len(offset_y_values)
+
+    if verbose:
+        print(f"探索空間: {len(scale_values)} scales × {len(offset_x_values)} X offsets × {len(offset_y_values)} Y offsets")
+        print(f"合計: {total_iterations} 通り")
+
+    iteration = 0
+    for scale_x in scale_values:
+        for scale_y in scale_values:
+            for offset_x in offset_x_values:
+                for offset_y in offset_y_values:
+                    # 変換適用
+                    corrected_fix = applyScalingAndOffset(
+                        fixations, scale_x, scale_y, offset_x, offset_y,
+                        center_x, center_y
+                    )
+
+                    # AOI内率を計算
+                    rate_info = computeAllAOIRate(corrected_fix, aois)
+                    rate = rate_info['rate']
+
+                    results.append((offset_x, offset_y, scale_x, scale_y, rate))
+
+                    if rate > best_rate:
+                        best_rate = rate
+                        best_params = (offset_x, offset_y, scale_x, scale_y)
+
+                    iteration += 1
+
+        # 進捗表示（scale_xごと）
+        if verbose:
+            print(f"  scale_x={scale_x:.2f} 完了 ({iteration}/{total_iterations})")
+
+    return {
+        "best_offset_x": float(best_params[0]),
+        "best_offset_y": float(best_params[1]),
+        "best_scale_x": float(best_params[2]),
+        "best_scale_y": float(best_params[3]),
+        "best_rate": best_rate,
+        "search_results": results
+    }
