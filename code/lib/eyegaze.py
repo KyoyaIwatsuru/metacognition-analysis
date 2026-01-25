@@ -1529,6 +1529,7 @@ def extractAllAOIs(coordinates, levels=None,
         - 'instruction': 問題文の指示
         - 'paragraph': 段落
         - 'sentence': 文
+        - 'word': 単語
         - 'question': 設問
         - 'choice': 選択肢
         - 'timer': タイマー (ui_components内 or header内)
@@ -1567,7 +1568,7 @@ def extractAllAOIs(coordinates, levels=None,
     """
     # デフォルトは全レベル
     if levels is None:
-        levels = ['instruction', 'paragraph', 'sentence', 'question', 'choice',
+        levels = ['instruction', 'paragraph', 'sentence', 'word', 'question', 'choice',
                   'timer', 'ui', 'header', 'reflection', 'title', 'subtitle', 'intro', 'analog',
                   'metadata', 'table', 'explanation', 'metacog']
     aois = []
@@ -1937,6 +1938,31 @@ def extractAllAOIs(coordinates, levels=None,
                             'is_multiline': is_multiline
                         })
 
+                    # word の bbox
+                    if 'word' in levels:
+                        if suffix == '_ja':
+                            # 日本語の場合：sentenceと同じbbox/linesを使用
+                            if bbox:
+                                aois.append({
+                                    'id': f'psg_{psg_idx}_para_{p_idx}_sent_{s_idx}_word{suffix}',
+                                    'level': 'word',
+                                    'text': sent.get('text', '')[:50],
+                                    'bbox': bbox,
+                                    'bboxes': bboxes,
+                                    'is_multiline': is_multiline
+                                })
+                        else:
+                            # 英語の場合：個別のword bboxを使用
+                            for w_idx, word in enumerate(sent.get('words', [])):
+                                word_bbox = word.get('bbox')
+                                if word_bbox:
+                                    aois.append({
+                                        'id': f'psg_{psg_idx}_para_{p_idx}_sent_{s_idx}_word_{w_idx}{suffix}',
+                                        'level': 'word',
+                                        'text': word.get('text', ''),
+                                        'bbox': word_bbox
+                                    })
+
     extract_passages(left_panel.get('passages', []))
     # 英語passagesの抽出（target_localeで制御）
     if include_en:
@@ -2140,8 +2166,8 @@ def extractAllAOIs(coordinates, levels=None,
                                     'bbox': bbox
                                 })
 
-                    # paragraphs（sentenceも含めて処理するため、paragraph or sentenceレベルが必要な場合に実行）
-                    if 'paragraph' in levels or 'sentence' in levels:
+                    # paragraphs（sentence/wordも含めて処理するため、いずれかのレベルが必要な場合に実行）
+                    if 'paragraph' in levels or 'sentence' in levels or 'word' in levels:
                         for p_idx, para in enumerate(passage.get('paragraphs', [])):
                             # paragraph AOIの追加（paragraphレベルが指定されている場合のみ）
                             if 'paragraph' in levels:
@@ -2165,28 +2191,54 @@ def extractAllAOIs(coordinates, levels=None,
                                         'is_multiline': is_multiline
                                     })
 
-                            # sentences
-                            if 'sentence' in levels:
-                                for s_idx, sent in enumerate(para.get('sentences', [])):
-                                    if 'position' in sent:
-                                        bbox = sent['position']
-                                        bboxes = [bbox]
-                                        is_multiline = False
-                                    elif 'lines' in sent:
-                                        bboxes, bbox, is_multiline = _lines_to_bboxes(sent['lines'])
+                            # sentences / words
+                            for s_idx, sent in enumerate(para.get('sentences', [])):
+                                if 'position' in sent:
+                                    bbox = sent['position']
+                                    bboxes = [bbox]
+                                    is_multiline = False
+                                elif 'lines' in sent:
+                                    bboxes, bbox, is_multiline = _lines_to_bboxes(sent['lines'])
+                                else:
+                                    bbox = None
+                                    bboxes = None
+                                    is_multiline = False
+
+                                # sentence AOI
+                                if bbox and 'sentence' in levels:
+                                    aois.append({
+                                        'id': f'analog_{an_idx}_psg_{psg_idx}_para_{p_idx}_sent_{s_idx}{suffix}',
+                                        'level': 'sentence',
+                                        'text': sent.get('text', '')[:50],
+                                        'bbox': bbox,
+                                        'bboxes': bboxes,
+                                        'is_multiline': is_multiline
+                                    })
+
+                                # word AOI
+                                if 'word' in levels:
+                                    if suffix == '_ja':
+                                        # 日本語の場合：sentenceと同じbbox/linesを使用
+                                        if bbox:
+                                            aois.append({
+                                                'id': f'analog_{an_idx}_psg_{psg_idx}_para_{p_idx}_sent_{s_idx}_word{suffix}',
+                                                'level': 'word',
+                                                'text': sent.get('text', '')[:50],
+                                                'bbox': bbox,
+                                                'bboxes': bboxes,
+                                                'is_multiline': is_multiline
+                                            })
                                     else:
-                                        bbox = None
-                                        bboxes = None
-                                        is_multiline = False
-                                    if bbox:
-                                        aois.append({
-                                            'id': f'analog_{an_idx}_psg_{psg_idx}_para_{p_idx}_sent_{s_idx}{suffix}',
-                                            'level': 'sentence',
-                                            'text': sent.get('text', '')[:50],
-                                            'bbox': bbox,
-                                            'bboxes': bboxes,
-                                            'is_multiline': is_multiline
-                                        })
+                                        # 英語の場合：個別のword bboxを使用
+                                        for w_idx, word in enumerate(sent.get('words', [])):
+                                            word_bbox = word.get('bbox')
+                                            if word_bbox:
+                                                aois.append({
+                                                    'id': f'analog_{an_idx}_psg_{psg_idx}_para_{p_idx}_sent_{s_idx}_word_{w_idx}{suffix}',
+                                                    'level': 'word',
+                                                    'text': word.get('text', ''),
+                                                    'bbox': word_bbox
+                                                })
 
     # === 右パネル ===
     right_panel = coords.get('right_panel', {})
