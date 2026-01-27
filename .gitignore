@@ -13,3 +13,6 @@ data/working/*/
 data/output/*/
 
 !.gitkeep
+
+# claude files
+claude.md

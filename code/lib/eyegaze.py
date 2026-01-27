@@ -43,26 +43,42 @@ _TRAINING_IMAGE_MAPPING = {
     'phase_complete_enter': '014',     # complete画面
 }
 
+# Pre/Post テスト用の画像マッピング（部分的: intro/complete のみ、questions は formula_mapping を使用）
+_PRE_POST_IMAGE_MAPPING = {
+    'phase_intro_enter': '002',        # intro画面
+    'phase_complete_enter': '011',     # complete画面 (8問題 + offset 2 + 1 = 011)
+}
+
 # フェーズ設定辞書
 PHASE_CONFIGS = {
     "pre": PhaseConfig(
         phase_name="pre",
-        phase_type="simple",
-        segment_event_types=["question_screen_open"],
-        image_mapping={},
-        use_formula_mapping=True,
+        phase_type="multi",
+        segment_event_types=[
+            "phase_intro_enter",
+            "question_screen_open",
+            "phase_complete_enter",
+            "phase_end"  # 終了境界
+        ],
+        image_mapping=_PRE_POST_IMAGE_MAPPING,
+        use_formula_mapping=True,  # question_screen_open は formula を使用
         image_offset=2,
-        extract_event_type=False,
+        extract_event_type=True,
         extract_analog_id=False,
     ),
     "post": PhaseConfig(
         phase_name="post",
-        phase_type="simple",
-        segment_event_types=["question_screen_open"],
-        image_mapping={},
-        use_formula_mapping=True,
+        phase_type="multi",
+        segment_event_types=[
+            "phase_intro_enter",
+            "question_screen_open",
+            "phase_complete_enter",
+            "phase_end"  # 終了境界
+        ],
+        image_mapping=_PRE_POST_IMAGE_MAPPING,
+        use_formula_mapping=True,  # question_screen_open は formula を使用
         image_offset=2,
-        extract_event_type=False,
+        extract_event_type=True,
         extract_analog_id=False,
     ),
     "training1": PhaseConfig(
@@ -77,7 +93,8 @@ PHASE_CONFIGS = {
             'analog_question_open',
             'analog_explanation_open',
             'reflection2_open',
-            'phase_complete_enter'
+            'phase_complete_enter',
+            'phase_end'  # 終了境界
         ],
         image_mapping=_TRAINING_IMAGE_MAPPING,
         use_formula_mapping=False,
@@ -96,7 +113,8 @@ PHASE_CONFIGS = {
             'analog_question_open',
             'analog_explanation_open',
             'reflection2_open',
-            'phase_complete_enter'
+            'phase_complete_enter',
+            'phase_end'  # 終了境界
         ],
         image_mapping=_TRAINING_IMAGE_MAPPING,
         use_formula_mapping=False,
@@ -115,7 +133,8 @@ PHASE_CONFIGS = {
             'analog_question_open',
             'analog_explanation_open',
             'reflection2_open',
-            'phase_complete_enter'
+            'phase_complete_enter',
+            'phase_end'  # 終了境界
         ],
         image_mapping=_TRAINING_IMAGE_MAPPING,
         use_formula_mapping=False,
@@ -477,8 +496,8 @@ def correctGazeGeometric(df,
                          calibration_head_y=0.0,
                          use_average_reference=False,
                          correct_y=False,
-                         screen_width_mm=509.0,
-                         screen_height_mm=287.0,
+                         screen_width_mm=509.2,
+                         screen_height_mm=286.4,
                          screen_width_px=1920,
                          screen_height_px=1080):
     """
@@ -652,8 +671,8 @@ def segmentGazeDataUnified(gaze_csv_path, events, end_timestamp, phase_config,
                            correct_y=False,
                            calibration_head_x=0.0,
                            calibration_head_y=0.0,
-                           screen_width_mm=509.0,
-                           screen_height_mm=287.0,
+                           screen_width_mm=509.2,
+                           screen_height_mm=286.4,
                            screen_width_px=1920,
                            screen_height_px=1080,
                            # trackbox方式用
@@ -743,12 +762,17 @@ def segmentGazeDataUnified(gaze_csv_path, events, end_timestamp, phase_config,
             segment_df['pupil_diameter'].values
         )).T
 
-        # 画像番号の決定
-        if phase_config.use_formula_mapping:
+        # 画像番号の決定（ハイブリッド方式: 明示的マッピングを優先、なければ formula）
+        event_type = event.get('event_type', '')
+        if event_type in phase_config.image_mapping:
+            # 明示的マッピングがあればそれを使用
+            image_number = phase_config.image_mapping[event_type]
+        elif phase_config.use_formula_mapping:
+            # formula マッピングにフォールバック
             image_number = passageIdToImageNumber(event.get('passage_id', ''))
         else:
-            event_type = event.get('event_type', '')
-            image_number = phase_config.image_mapping.get(event_type, '000')
+            # デフォルト値
+            image_number = '000'
 
         # セグメント構造
         segment = {
@@ -779,8 +803,8 @@ def readTobiiData(eye_tracking_dir, event_log_path, phase="pre",
                   correct_y=False,
                   calibration_head_x=0.0,
                   calibration_head_y=0.0,
-                  screen_width_mm=509.0,
-                  screen_height_mm=287.0,
+                  screen_width_mm=509.2,
+                  screen_height_mm=286.4,
                   screen_width_px=1920,
                   screen_height_px=1080,
                   # trackbox方式用
@@ -821,14 +845,22 @@ def readTobiiData(eye_tracking_dir, event_log_path, phase="pre",
         correction_method = "trackbox" if phase.startswith("training") else "geometric"
 
     # イベント読み込み
+    # "phase_end" は仮想マーカーなので実際のイベントタイプから除外
+    actual_event_types = [et for et in phase_config.segment_event_types if et != "phase_end"]
+
     if phase_config.phase_type == "simple":
-        events = readEventLog(event_log_path, phase_config.segment_event_types[0])
+        events = readEventLog(event_log_path, actual_event_types[0])
     else:
-        events = readEventLogMultiple(event_log_path, phase_config.segment_event_types)
+        events = readEventLogMultiple(event_log_path, actual_event_types)
 
     # 終了イベントのタイムスタンプ
-    end_events = readEventLog(event_log_path, "phase_complete_enter")
-    end_timestamp = end_events[0]['timestamp'] if end_events else None
+    # "phase_end" が segment_event_types に含まれる場合は、phase_complete_enter がセグメントとして扱われるため
+    # end_timestamp は None にして、視線データの最大タイムスタンプを使用する
+    if "phase_end" in phase_config.segment_event_types:
+        end_timestamp = None  # segmentGazeDataUnified で gaze_data.max() を使用
+    else:
+        end_events = readEventLog(event_log_path, "phase_complete_enter")
+        end_timestamp = end_events[0]['timestamp'] if end_events else None
 
     # セグメント化
     gaze_csv = os.path.join(eye_tracking_dir, "tobii_pro_gaze.csv")
@@ -879,6 +911,139 @@ def loadCoordinates(json_path):
     import json
     with open(json_path, 'r', encoding='utf-8') as f:
         return json.load(f)
+
+
+def _eventTypeToCoordPrefix(event_type):
+    """
+    イベントタイプから座標ファイルプレフィックスを取得
+
+    Parameters:
+    -----------
+    event_type : str
+        イベントタイプ (例: 'question_screen_open', 'training_explanation_open')
+        類題は 'analog_question_open_an1' のように _anN サフィックス付き
+
+    Returns:
+    --------
+    str or None
+        座標ファイルプレフィックス (例: 'question', 'training_explanation')
+    """
+    if not event_type:
+        return None
+
+    # 完全一致を優先
+    exact_mapping = {
+        'question_screen_open': 'question',
+        'training_explanation_open': 'training_explanation',
+        'reflection1_open': 'reflection1',
+        'reflection2_open': 'reflection2',
+        'analog_question_open': 'analog_question',
+        'analog_explanation_open': 'analog_explanation',
+        'phase_intro_enter': 'training_intro',
+        'analog_intro_enter': 'analog_intro',
+        'phase_complete_enter': 'training_complete',
+    }
+
+    if event_type in exact_mapping:
+        return exact_mapping[event_type]
+
+    # _anN サフィックス付きのイベントタイプに対応
+    # 例: 'analog_question_open_an1' -> 'analog_question'
+    # 例: 'analog_explanation_open_an2' -> 'analog_explanation'
+    if event_type.startswith('analog_question_open'):
+        return 'analog_question'
+    if event_type.startswith('analog_explanation_open'):
+        return 'analog_explanation'
+
+    return None
+
+
+def buildCoordinateMapping(coord_dir):
+    """
+    座標ディレクトリから(prefix, segment_id) -> coord_pathのマッピングを作成
+
+    Parameters:
+    -----------
+    coord_dir : str
+        座標JSONファイルが格納されているディレクトリ
+
+    Returns:
+    --------
+    dict
+        {(prefix, segment_id): coord_path} のマッピング
+        - prefix: 'question', 'training_explanation', 'reflection1', etc.
+        - segment_id: passage_id or analog_id (introやcompleteはNone)
+    """
+    import json
+    from glob import glob
+
+    mapping = {}
+
+    # 全JSONファイルを処理
+    for coord_file in glob(os.path.join(coord_dir, '*.json')):
+        filename = os.path.basename(coord_file)
+
+        # ファイル名からプレフィックスとsegment_idを抽出
+        # パターン: {prefix}_{passage_id}_{timestamp}.json
+        #         または {prefix}_{passage_id}_{analog_id}_{timestamp}.json
+
+        # 各プレフィックスに対応
+        if filename.startswith('question_') and not filename.startswith('analog_'):
+            # question_tr_01_*.json -> ('question', 'tr_01')
+            parts = filename.replace('question_', '').split('_')
+            if len(parts) >= 2:
+                passage_id = f"{parts[0]}_{parts[1]}"
+                mapping[('question', passage_id)] = coord_file
+
+        elif filename.startswith('training_explanation_'):
+            # training_explanation_tr_01_*.json -> ('training_explanation', 'tr_01')
+            parts = filename.replace('training_explanation_', '').split('_')
+            if len(parts) >= 2:
+                passage_id = f"{parts[0]}_{parts[1]}"
+                mapping[('training_explanation', passage_id)] = coord_file
+
+        elif filename.startswith('reflection1_'):
+            # reflection1_tr_01_*.json -> ('reflection1', 'tr_01')
+            parts = filename.replace('reflection1_', '').split('_')
+            if len(parts) >= 2:
+                passage_id = f"{parts[0]}_{parts[1]}"
+                mapping[('reflection1', passage_id)] = coord_file
+
+        elif filename.startswith('reflection2_'):
+            # reflection2_tr_01_*.json -> ('reflection2', 'tr_01')
+            parts = filename.replace('reflection2_', '').split('_')
+            if len(parts) >= 2:
+                passage_id = f"{parts[0]}_{parts[1]}"
+                mapping[('reflection2', passage_id)] = coord_file
+
+        elif filename.startswith('analog_question_'):
+            # analog_question_tr_01_tr_01_an1_*.json -> ('analog_question', 'tr_01_an1')
+            with open(coord_file, 'r', encoding='utf-8') as f:
+                coords = json.load(f)
+            coords_inner = coords.get('coordinates', coords)
+            analog_id = coords_inner.get('analog_id')
+            if analog_id:
+                mapping[('analog_question', analog_id)] = coord_file
+
+        elif filename.startswith('analog_explanation_'):
+            # analog_explanation_tr_01_tr_01_an1_*.json -> ('analog_explanation', 'tr_01_an1')
+            with open(coord_file, 'r', encoding='utf-8') as f:
+                coords = json.load(f)
+            coords_inner = coords.get('coordinates', coords)
+            analog_id = coords_inner.get('analog_id')
+            if analog_id:
+                mapping[('analog_explanation', analog_id)] = coord_file
+
+        elif filename.startswith('training_intro_'):
+            mapping[('training_intro', None)] = coord_file
+
+        elif filename.startswith('analog_intro_'):
+            mapping[('analog_intro', None)] = coord_file
+
+        elif filename.startswith('training_complete_'):
+            mapping[('training_complete', None)] = coord_file
+
+    return mapping
 
 
 def extractAOIs(coordinates, levels=None):
@@ -1019,83 +1184,9 @@ def extractAOIs(coordinates, levels=None):
     return aois
 
 
-def _point_in_bboxes(x, y, bboxes):
-    """
-    点が複数のbboxのいずれかに含まれるか判定
-
-    Parameters:
-    -----------
-    x, y : float
-        チェックする座標
-    bboxes : list of dict
-        bboxのリスト [{x, y, width, height}, ...]
-
-    Returns:
-    --------
-    bool
-        いずれかのbboxに含まれればTrue
-    """
-    for bbox in bboxes:
-        if (bbox['x'] <= x <= bbox['x'] + bbox['width'] and
-            bbox['y'] <= y <= bbox['y'] + bbox['height']):
-            return True
-    return False
-
-
-def findAOIForPoint(x, y, aois, level=None):
-    """
-    座標がどのAOIに含まれるか判定
-
-    Parameters:
-    -----------
-    x : float
-        X座標（ピクセル）
-    y : float
-        Y座標（ピクセル）
-    aois : list of dict
-        extractAOIs()で抽出したAOIリスト
-    level : str, optional
-        特定のレベルのみを検索（例: "sentence"）。
-        Noneの場合は全レベルから最小のAOIを返す
-
-    Returns:
-    --------
-    dict or None
-        マッチしたAOI。マッチしない場合はNone
-    """
-    matches = []
-
-    for aoi in aois:
-        if level is not None and aoi['level'] != level:
-            continue
-
-        # multiline AOIの場合は個別のbboxをチェック
-        if aoi.get('is_multiline') and 'bboxes' in aoi:
-            if _point_in_bboxes(x, y, aoi['bboxes']):
-                matches.append(aoi)
-        else:
-            # 単一行または後方互換性
-            bbox = aoi['bbox']
-            if (bbox['x'] <= x <= bbox['x'] + bbox['width'] and
-                bbox['y'] <= y <= bbox['y'] + bbox['height']):
-                matches.append(aoi)
-
-    if not matches:
-        return None
-
-    # 複数マッチした場合は最小面積のAOIを返す（より具体的な要素）
-    # multiline AOIの場合はbboxesの合計面積を使用
-    def get_area(aoi):
-        if aoi.get('is_multiline') and 'bboxes' in aoi:
-            return sum(b['width'] * b['height'] for b in aoi['bboxes'])
-        return aoi['bbox']['width'] * aoi['bbox']['height']
-
-    return min(matches, key=get_area)
-
-
 def matchFixationsToAOIs(fixations, aois):
     """
-    全fixationに対してAOIをマッチング
+    全fixationに対してAOIをマッチング（NumPyベクトル化版）
 
     Parameters:
     -----------
@@ -1120,32 +1211,121 @@ def matchFixationsToAOIs(fixations, aois):
     else:
         df = fixations.copy()
 
+    n_fixations = len(df)
+    if n_fixations == 0:
+        return []
+
+    # Fixation座標を抽出
+    fx = df['x'].values
+    fy = df['y'].values
+
+    # レベルごとにAOIをグループ化し、bbox配列を作成
+    levels = ['word', 'sentence', 'paragraph', 'choice', 'question']
+    level_data = {}
+
+    for level in levels:
+        level_aois = [a for a in aois if a.get('level') == level]
+        if not level_aois:
+            level_data[level] = {'bbox_arr': None, 'aoi_list': [], 'areas': []}
+            continue
+
+        # 各AOIのbboxを展開（multilineは複数bbox）
+        bbox_list = []
+        aoi_indices = []  # どのAOIに属するか
+        areas = []
+
+        for i, aoi in enumerate(level_aois):
+            if aoi.get('is_multiline') and 'bboxes' in aoi:
+                total_area = 0
+                for bbox in aoi['bboxes']:
+                    bbox_list.append([bbox['x'], bbox['y'],
+                                     bbox['x'] + bbox['width'],
+                                     bbox['y'] + bbox['height']])
+                    aoi_indices.append(i)
+                    total_area += bbox['width'] * bbox['height']
+                areas.append(total_area)
+            elif 'bbox' in aoi:
+                bbox = aoi['bbox']
+                bbox_list.append([bbox['x'], bbox['y'],
+                                 bbox['x'] + bbox['width'],
+                                 bbox['y'] + bbox['height']])
+                aoi_indices.append(i)
+                areas.append(bbox['width'] * bbox['height'])
+
+        if bbox_list:
+            level_data[level] = {
+                'bbox_arr': np.array(bbox_list),  # (M, 4)
+                'aoi_indices': np.array(aoi_indices),
+                'aoi_list': level_aois,
+                'areas': np.array(areas)
+            }
+        else:
+            level_data[level] = {'bbox_arr': None, 'aoi_list': [], 'areas': []}
+
+    # 各レベルでマッチングを実行
+    matched = {level: [None] * n_fixations for level in levels}
+
+    for level in levels:
+        data = level_data[level]
+        if data['bbox_arr'] is None:
+            continue
+
+        bbox_arr = data['bbox_arr']
+        aoi_indices = data['aoi_indices']
+        aoi_list = data['aoi_list']
+        areas = data['areas']
+
+        # ブロードキャストで全判定: (N, M)
+        in_x = (fx[:, None] >= bbox_arr[:, 0]) & (fx[:, None] <= bbox_arr[:, 2])
+        in_y = (fy[:, None] >= bbox_arr[:, 1]) & (fy[:, None] <= bbox_arr[:, 3])
+        in_bbox = in_x & in_y  # (N, M)
+
+        # 各fixationについてマッチしたAOIを見つける
+        for i in range(n_fixations):
+            matching_bbox_indices = np.where(in_bbox[i])[0]
+            if len(matching_bbox_indices) == 0:
+                continue
+
+            # マッチしたAOIのインデックスを取得
+            matching_aoi_indices = aoi_indices[matching_bbox_indices]
+            unique_aoi_indices = np.unique(matching_aoi_indices)
+
+            # 最小面積のAOIを選択
+            min_area = float('inf')
+            best_aoi = None
+            for aoi_idx in unique_aoi_indices:
+                if areas[aoi_idx] < min_area:
+                    min_area = areas[aoi_idx]
+                    best_aoi = aoi_list[aoi_idx]
+
+            matched[level][i] = best_aoi
+
+    # 結果を構築
     results = []
+    timestamps = df['timestamp'].values
+    durations = df['duration'].values
+    pupil_diameters = df['pupil_diameter'].values if 'pupil_diameter' in df.columns else [np.nan] * n_fixations
 
-    for _, row in df.iterrows():
-        x, y = row['x'], row['y']
-
-        # 各レベルでマッチング
-        word_aoi = findAOIForPoint(x, y, aois, level="word")
-        sent_aoi = findAOIForPoint(x, y, aois, level="sentence")
-        para_aoi = findAOIForPoint(x, y, aois, level="paragraph")
-        choice_aoi = findAOIForPoint(x, y, aois, level="choice")
-        question_aoi = findAOIForPoint(x, y, aois, level="question")
+    for i in range(n_fixations):
+        word_aoi = matched['word'][i]
+        sent_aoi = matched['sentence'][i]
+        para_aoi = matched['paragraph'][i]
+        choice_aoi = matched['choice'][i]
+        question_aoi = matched['question'][i]
 
         result = {
-            'timestamp': row['timestamp'],
-            'x': x,
-            'y': y,
-            'duration': row['duration'],
-            'pupil_diameter': row.get('pupil_diameter', np.nan),
-            # 各レベルのAOI情報
+            'timestamp': timestamps[i],
+            'x': fx[i],
+            'y': fy[i],
+            'duration': durations[i],
+            'pupil_diameter': pupil_diameters[i] if i < len(pupil_diameters) else np.nan,
             'word_id': word_aoi['id'] if word_aoi else None,
-            'word_text': word_aoi['text'] if word_aoi else None,
+            'word_text': word_aoi.get('text') if word_aoi else None,
             'sentence_id': sent_aoi['id'] if sent_aoi else None,
-            'sentence_text': sent_aoi['text'] if sent_aoi else None,
+            'sentence_text': sent_aoi.get('text') if sent_aoi else None,
             'paragraph_id': para_aoi['id'] if para_aoi else None,
             'choice_id': choice_aoi['id'] if choice_aoi else None,
-            'choice_text': choice_aoi['text'] if choice_aoi else None,
+            'choice_text': choice_aoi.get('text') if choice_aoi else None,
             'question_id': question_aoi['id'] if question_aoi else None,
         }
         results.append(result)
@@ -1155,7 +1335,7 @@ def matchFixationsToAOIs(fixations, aois):
 
 def computeAOIStatistics(matched_fixations, level="sentence"):
     """
-    各AOIの注視統計を計算
+    各AOIの注視統計を計算（最適化版）
 
     Parameters:
     -----------
@@ -1181,44 +1361,48 @@ def computeAOIStatistics(matched_fixations, level="sentence"):
     id_key = f"{level}_id"
     text_key = f"{level}_text" if level != "paragraph" else None
 
-    # AOIごとにfixationを集計
+    # AOIごとにfixationを集計（インデックスも保存）
     aoi_data = defaultdict(list)
 
-    for fix in matched_fixations:
+    for idx, fix in enumerate(matched_fixations):
         aoi_id = fix.get(id_key)
         if aoi_id is not None:
-            aoi_data[aoi_id].append(fix)
+            # インデックスを含めて保存
+            aoi_data[aoi_id].append((idx, fix))
 
     # 統計計算
     stats = []
-    for aoi_id, fixations in aoi_data.items():
-        durations = [f['duration'] for f in fixations]
-        timestamps = [f['timestamp'] for f in fixations]
+    for aoi_id, indexed_fixations in aoi_data.items():
+        # インデックス順にソート
+        indexed_fixations.sort(key=lambda x: x[0])
+
+        durations = [f['duration'] for _, f in indexed_fixations]
+        timestamps = [f['timestamp'] for _, f in indexed_fixations]
+        indices = [idx for idx, _ in indexed_fixations]
 
         # 再訪問回数（連続しないfixationのグループ数 - 1）
         revisits = 0
         prev_idx = -2
-        for fix in sorted(fixations, key=lambda x: x['timestamp']):
-            fix_idx = matched_fixations.index(fix)
-            if fix_idx != prev_idx + 1:
+        for idx in indices:
+            if idx != prev_idx + 1:
                 revisits += 1
-            prev_idx = fix_idx
+            prev_idx = idx
         revisits = max(0, revisits - 1)
 
-        text = fixations[0].get(text_key, '') if text_key else ''
+        text = indexed_fixations[0][1].get(text_key, '') if text_key else ''
 
         stats.append({
             'aoi_id': aoi_id,
             'level': level,
             'text': text[:50] + ('...' if len(text) > 50 else '') if text else '',
             'total_duration': sum(durations),
-            'fixation_count': len(fixations),
+            'fixation_count': len(indexed_fixations),
             'mean_duration': np.mean(durations),
             'first_fixation_time': min(timestamps),
             'revisits': revisits
         })
 
-    return pd.DataFrame(stats).sort_values('first_fixation_time')
+    return pd.DataFrame(stats).sort_values('first_fixation_time') if stats else pd.DataFrame()
 
 
 # =============================================================================
@@ -1598,9 +1782,6 @@ def extractAllAOIs(coordinates, levels=None,
     else:
         include_en = True
         include_ja = True
-
-    # 後方互換性のため維持
-    is_en_only_page = not include_ja
 
     # === ヘッダー ===
     header = coords.get('header', {})
@@ -2683,9 +2864,9 @@ def extractAllAOIs(coordinates, levels=None,
     return aois
 
 
-def computeAllAOIRate(fixations, aois):
+def computeAllAOIRate(fixations, aois, tolerance=0.0):
     """
-    全AOIを対象にFixationのAOI内率を計算
+    全AOIを対象にFixationのAOI内率を計算（NumPyベクトル化版）
 
     Parameters:
     -----------
@@ -2693,6 +2874,8 @@ def computeAllAOIRate(fixations, aois):
         Fixationデータ (N, 8)。[:, 1]がX座標、[:, 2]がY座標
     aois : list of dict
         extractAllAOIs()で抽出したAOIリスト
+    tolerance : float
+        AOI境界からの許容距離（ピクセル）。デフォルト0.0（厳密判定）
 
     Returns:
     --------
@@ -2706,25 +2889,52 @@ def computeAllAOIRate(fixations, aois):
     if len(fixations) == 0:
         return {"rate": 0.0, "fixations_in_aoi": 0, "total_fixations": 0}
 
-    in_aoi = 0
-    for fix in fixations:
-        x, y = fix[1], fix[2]
-        for aoi in aois:
-            # multiline AOIの場合は個別bboxをチェック
-            if aoi.get('is_multiline') and 'bboxes' in aoi:
-                if _point_in_bboxes(x, y, aoi['bboxes']):
-                    in_aoi += 1
-                    break
-            else:
-                bbox = aoi['bbox']
-                if (bbox['x'] <= x <= bbox['x'] + bbox['width'] and
-                    bbox['y'] <= y <= bbox['y'] + bbox['height']):
-                    in_aoi += 1
-                    break
+    if len(aois) == 0:
+        return {"rate": 0.0, "fixations_in_aoi": 0, "total_fixations": len(fixations)}
+
+    # 全bboxを配列に展開 (multiline AOIは複数bboxを持つ)
+    all_bboxes = []
+    for aoi in aois:
+        if aoi.get('is_multiline') and 'bboxes' in aoi:
+            for bbox in aoi['bboxes']:
+                all_bboxes.append([
+                    bbox['x'] - tolerance,
+                    bbox['y'] - tolerance,
+                    bbox['x'] + bbox['width'] + tolerance,
+                    bbox['y'] + bbox['height'] + tolerance
+                ])
+        elif 'bbox' in aoi:
+            bbox = aoi['bbox']
+            all_bboxes.append([
+                bbox['x'] - tolerance,
+                bbox['y'] - tolerance,
+                bbox['x'] + bbox['width'] + tolerance,
+                bbox['y'] + bbox['height'] + tolerance
+            ])
+
+    if len(all_bboxes) == 0:
+        return {"rate": 0.0, "fixations_in_aoi": 0, "total_fixations": len(fixations)}
+
+    # NumPy配列に変換: (M, 4) - [x_min, y_min, x_max, y_max]
+    bbox_arr = np.array(all_bboxes)  # (M, 4)
+
+    # Fixation座標を抽出: (N,)
+    fx = fixations[:, 1]
+    fy = fixations[:, 2]
+
+    # ブロードキャストで全組み合わせを判定: (N, M)
+    # fx[:, None] は (N, 1) になり、bbox_arr[:, 0] の (M,) とブロードキャスト
+    in_x = (fx[:, None] >= bbox_arr[:, 0]) & (fx[:, None] <= bbox_arr[:, 2])
+    in_y = (fy[:, None] >= bbox_arr[:, 1]) & (fy[:, None] <= bbox_arr[:, 3])
+    in_bbox = in_x & in_y  # (N, M)
+
+    # 各fixationがいずれかのbboxに入っているか
+    in_any_aoi = in_bbox.any(axis=1)  # (N,)
+    in_aoi = in_any_aoi.sum()
 
     return {
         "rate": in_aoi / len(fixations),
-        "fixations_in_aoi": in_aoi,
+        "fixations_in_aoi": int(in_aoi),
         "total_fixations": len(fixations)
     }
 
@@ -2772,6 +2982,7 @@ def estimateOffsetWithScaling(fixations, aois,
                                offset_step=10,
                                scale_step=0.02,
                                center_x=960, center_y=540,
+                               tolerance=0.0,
                                verbose=True):
     """
     スケーリング + オフセットの最適パラメータをグリッドサーチで推定
@@ -2792,6 +3003,8 @@ def estimateOffsetWithScaling(fixations, aois,
         スケーリングの探索刻み幅
     center_x, center_y : float
         スケーリングの基準点
+    tolerance : float
+        AOI境界からの許容距離（ピクセル）。デフォルト0.0（厳密判定）
     verbose : bool
         進捗表示するか
 
@@ -2832,20 +3045,49 @@ def estimateOffsetWithScaling(fixations, aois,
         print(f"探索空間: {len(scale_values)} scales × {len(offset_x_values)} X offsets × {len(offset_y_values)} Y offsets")
         print(f"合計: {total_iterations} 通り")
 
+    # AOIのbbox配列を事前計算（高速化のため）
+    all_bboxes = []
+    for aoi in aois:
+        if aoi.get('is_multiline') and 'bboxes' in aoi:
+            for bbox in aoi['bboxes']:
+                all_bboxes.append([
+                    bbox['x'] - tolerance,
+                    bbox['y'] - tolerance,
+                    bbox['x'] + bbox['width'] + tolerance,
+                    bbox['y'] + bbox['height'] + tolerance
+                ])
+        elif 'bbox' in aoi:
+            bbox = aoi['bbox']
+            all_bboxes.append([
+                bbox['x'] - tolerance,
+                bbox['y'] - tolerance,
+                bbox['x'] + bbox['width'] + tolerance,
+                bbox['y'] + bbox['height'] + tolerance
+            ])
+    bbox_arr = np.array(all_bboxes) if all_bboxes else None  # (M, 4)
+
+    # Fixation座標を事前抽出
+    fx_base = fixations[:, 1]
+    fy_base = fixations[:, 2]
+    n_fixations = len(fixations)
+
     iteration = 0
     for scale_x in scale_values:
         for scale_y in scale_values:
             for offset_x in offset_x_values:
                 for offset_y in offset_y_values:
-                    # 変換適用
-                    corrected_fix = applyScalingAndOffset(
-                        fixations, scale_x, scale_y, offset_x, offset_y,
-                        center_x, center_y
-                    )
+                    # 変換を直接適用（配列コピーを避ける）
+                    fx = scale_x * (fx_base - center_x) + center_x + offset_x
+                    fy = scale_y * (fy_base - center_y) + center_y + offset_y
 
-                    # AOI内率を計算
-                    rate_info = computeAllAOIRate(corrected_fix, aois)
-                    rate = rate_info['rate']
+                    # AOI内率を計算（事前計算したbbox配列を使用）
+                    if bbox_arr is not None and len(bbox_arr) > 0:
+                        in_x = (fx[:, None] >= bbox_arr[:, 0]) & (fx[:, None] <= bbox_arr[:, 2])
+                        in_y = (fy[:, None] >= bbox_arr[:, 1]) & (fy[:, None] <= bbox_arr[:, 3])
+                        in_any_aoi = (in_x & in_y).any(axis=1).sum()
+                        rate = in_any_aoi / n_fixations
+                    else:
+                        rate = 0.0
 
                     results.append((offset_x, offset_y, scale_x, scale_y, rate))
 
@@ -2867,3 +3109,1557 @@ def estimateOffsetWithScaling(fixations, aois,
         "best_rate": best_rate,
         "search_results": results
     }
+
+
+# =============================================================================
+# Click-Anchored Correction (クリック参照点ベース視線補正)
+# =============================================================================
+
+def extractClickReferencePoints(event_log_path, coord_dir, gaze_csv_path,
+                                 window_before_ms=200, window_after_ms=50,
+                                 min_samples=5, outlier_threshold_px=300):
+    """
+    クリック・タブ・ボタンイベントから視線補正の参照点を抽出
+
+    以下のイベントから視線補正の参照点を抽出する:
+    - choice_click: 選択肢クリック → choice_bbox中心
+    - answer_submit, analog_answer_submit: 回答送信 → submit_button中心
+    - locale_tab_click: 言語タブクリック → header.locale_tabs[locale].bbox中心
+    - question_tab_click: 問題タブクリック → header.question_tabs[index].bbox中心
+    - analog_tab_click: 類題タブクリック → header.analog_tabs[index].bbox中心
+    - reflection1_submit, reflection2_submit: reflection送信 → footer.submit_button中心
+    - training_explanation_exit, analog_explanation_exit: 解説終了 → footer.submit_button中心
+
+    Parameters:
+    -----------
+    event_log_path : str
+        イベントログファイルのパス (.jsonl)
+    coord_dir : str
+        座標JSONファイルが格納されているディレクトリ
+    gaze_csv_path : str
+        tobii_pro_gaze.csvのパス
+    window_before_ms : float
+        クリック前の視線サンプル取得時間（ミリ秒）。デフォルト: 200
+    window_after_ms : float
+        クリック後の視線サンプル取得時間（ミリ秒）。デフォルト: 50
+    min_samples : int
+        参照点に必要な最小視線サンプル数。デフォルト: 5
+    outlier_threshold_px : float
+        これ以上ずれた参照点は外れ値として除外（ピクセル）。デフォルト: 300
+
+    Returns:
+    --------
+    pd.DataFrame
+        参照点データ。カラム:
+        - timestamp: クリック時刻（秒）
+        - segment_id: セグメント識別子（passage_id or analog_id）
+        - question_id: クリックした問題ID（choice_click以外はNone）
+        - choice_id: クリックした選択肢（choice_click以外はNone）
+        - click_type: イベント種別
+        - expected_x, expected_y: UI要素の中心座標
+        - observed_x, observed_y: イベント時の視線位置中央値
+        - n_samples: 使用した視線サンプル数
+        - offset_x, offset_y: このポイントでのずれ（expected - observed）
+    """
+    import json
+    import pandas as pd
+    from datetime import datetime
+    from glob import glob
+
+    # 1. イベントログから各種イベントを抽出
+    click_events = []  # choice_click
+    submit_events = []  # answer_submit, analog_answer_submit
+    tab_events = []  # locale_tab_click, question_tab_click, analog_tab_click
+    exit_events = []  # reflection1_submit, reflection2_submit, training_explanation_exit, analog_explanation_exit
+
+    with open(event_log_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            data = json.loads(line.strip())
+            event_type = data.get('event')
+            iso_timestamp = data.get('timestamp')
+            if not iso_timestamp:
+                continue
+
+            dt_utc = datetime.fromisoformat(iso_timestamp.replace('Z', '+00:00'))
+            dt_local = dt_utc.astimezone()
+            unix_timestamp = dt_local.timestamp()
+
+            if event_type == 'choice_click':
+                click_events.append({
+                    'timestamp': unix_timestamp,
+                    'passage_id': data.get('passage_id'),
+                    'analog_id': data.get('analog_id'),
+                    'question_id': data.get('question_id'),
+                    'choice_id': data.get('choice_id'),
+                    'iso_timestamp': iso_timestamp
+                })
+
+            elif event_type == 'answer_submit':
+                submit_events.append({
+                    'timestamp': unix_timestamp,
+                    'passage_id': data.get('passage_id'),
+                    'analog_id': None,
+                    'iso_timestamp': iso_timestamp
+                })
+
+            elif event_type == 'analog_answer_submit':
+                submit_events.append({
+                    'timestamp': unix_timestamp,
+                    'passage_id': data.get('passage_id'),
+                    'analog_id': data.get('analog_id'),
+                    'iso_timestamp': iso_timestamp
+                })
+
+            elif event_type == 'locale_tab_click':
+                tab_events.append({
+                    'timestamp': unix_timestamp,
+                    'event_type': 'locale_tab_click',
+                    'passage_id': data.get('passage_id'),
+                    'analog_id': data.get('analog_id'),
+                    'locale': data.get('locale'),
+                    'iso_timestamp': iso_timestamp
+                })
+
+            elif event_type == 'question_tab_click':
+                tab_events.append({
+                    'timestamp': unix_timestamp,
+                    'event_type': 'question_tab_click',
+                    'passage_id': data.get('passage_id'),
+                    'analog_id': data.get('analog_id'),
+                    'question_index': data.get('question_index'),
+                    'iso_timestamp': iso_timestamp
+                })
+
+            elif event_type == 'analog_tab_click':
+                tab_events.append({
+                    'timestamp': unix_timestamp,
+                    'event_type': 'analog_tab_click',
+                    'passage_id': data.get('passage_id'),
+                    'analog_index': data.get('analog_index'),
+                    'iso_timestamp': iso_timestamp
+                })
+
+            elif event_type == 'reflection1_submit':
+                exit_events.append({
+                    'timestamp': unix_timestamp,
+                    'event_type': 'reflection1_submit',
+                    'passage_id': data.get('passage_id'),
+                    'analog_id': None,
+                    'coord_type': 'reflection1',
+                    'iso_timestamp': iso_timestamp
+                })
+
+            elif event_type == 'reflection2_submit':
+                exit_events.append({
+                    'timestamp': unix_timestamp,
+                    'event_type': 'reflection2_submit',
+                    'passage_id': data.get('passage_id'),
+                    'analog_id': None,
+                    'coord_type': 'reflection2',
+                    'iso_timestamp': iso_timestamp
+                })
+
+            elif event_type == 'training_explanation_exit':
+                exit_events.append({
+                    'timestamp': unix_timestamp,
+                    'event_type': 'training_explanation_exit',
+                    'passage_id': data.get('passage_id'),
+                    'analog_id': None,
+                    'coord_type': 'training_explanation',
+                    'iso_timestamp': iso_timestamp
+                })
+
+            elif event_type == 'analog_explanation_exit':
+                exit_events.append({
+                    'timestamp': unix_timestamp,
+                    'event_type': 'analog_explanation_exit',
+                    'passage_id': data.get('passage_id'),
+                    'analog_id': data.get('analog_id'),
+                    'coord_type': 'analog_explanation',
+                    'iso_timestamp': iso_timestamp
+                })
+
+    all_events_empty = (not click_events and not submit_events and
+                        not tab_events and not exit_events)
+    if all_events_empty:
+        return pd.DataFrame()
+
+    # 2. 座標JSONファイルを読み込み
+    # question画面用: question_*.json, analog_question_*.json
+    coord_files = glob(os.path.join(coord_dir, 'question_*.json'))
+    coord_files += glob(os.path.join(coord_dir, 'analog_question_*.json'))
+    coord_data = {}  # passage_id or analog_id -> coordinates (question画面用)
+    for coord_file in coord_files:
+        with open(coord_file, 'r', encoding='utf-8') as f:
+            coords = json.load(f)
+        coords_inner = coords.get('coordinates', coords)
+        analog_id = coords_inner.get('analog_id')
+        passage_id = coords_inner.get('passage_id')
+        if analog_id:
+            coord_data[analog_id] = coords_inner
+        elif passage_id:
+            coord_data[passage_id] = coords_inner
+
+    # 解説・reflection画面用の座標ファイルを読み込み
+    # キー: (coord_type, passage_id, analog_id) -> coordinates
+    extra_coord_data = {}  # (coord_type, passage_id, analog_id) -> coordinates
+    for pattern in ['reflection1_*.json', 'reflection2_*.json',
+                    'training_explanation_*.json', 'analog_explanation_*.json']:
+        for coord_file in glob(os.path.join(coord_dir, pattern)):
+            with open(coord_file, 'r', encoding='utf-8') as f:
+                coords = json.load(f)
+            coords_inner = coords.get('coordinates', coords)
+            page_type = coords_inner.get('page_type', '')
+            passage_id = coords_inner.get('passage_id')
+            analog_id = coords_inner.get('analog_id')
+            # page_type からcoord_typeを抽出（例: 'training_explanation' -> 'training_explanation'）
+            coord_type = page_type.split('_' + passage_id)[0] if passage_id else page_type
+            key = (coord_type, passage_id, analog_id)
+            extra_coord_data[key] = coords_inner
+
+    # 3. 視線データを読み込み
+    gaze_df = pd.read_csv(gaze_csv_path)
+    gaze_df = gaze_df.dropna(subset=['gaze_x', 'gaze_y'])
+    gaze_df['timestamp_sec'] = gaze_df['#timestamp'] * 0.001 + 32400  # JST変換
+
+    # 4. 各クリックイベントに対して参照点を抽出
+    reference_points = []
+
+    for click in click_events:
+        passage_id = click['passage_id']
+        analog_id = click.get('analog_id')  # 類題の場合はanalog_idがある
+        question_id = click['question_id']
+        choice_id = click['choice_id']
+        click_time = click['timestamp']
+
+        # 座標データを取得（analog_idがあればそれを優先）
+        coord_key = analog_id if analog_id and analog_id in coord_data else passage_id
+        if coord_key not in coord_data:
+            continue
+        coords = coord_data[coord_key]
+
+        # choice_bboxを取得
+        # メイン問題では'choice_bbox'、類題では'bbox'という名前
+        right_panel = coords.get('right_panel', {})
+        questions = right_panel.get('questions', [])
+
+        choice_bbox = None
+        choice_text = None
+        for q in questions:
+            if q.get('question_id') == question_id:
+                for c in q.get('choices', []):
+                    if c.get('choice_id') == choice_id:
+                        choice_bbox = c.get('choice_bbox') or c.get('bbox')
+                        choice_text = c.get('choice_text')
+                        break
+                break
+
+        if not choice_bbox:
+            continue
+
+        # 期待位置を計算: テキスト中央を優先、なければbbox中央
+        text_lines = choice_text.get('lines', []) if choice_text else []
+        if text_lines:
+            # テキストの最初の行の中央を基準にする
+            # （左端だと寄りすぎ、bbox中央だと離れすぎるため）
+            first_line = text_lines[0]
+            expected_x = first_line['x'] + first_line['width'] / 2
+            expected_y = first_line['y'] + first_line['height'] / 2
+        else:
+            # フォールバック: bboxの中央
+            expected_x = choice_bbox['x'] + choice_bbox['width'] / 2
+            expected_y = choice_bbox['y'] + choice_bbox['height'] / 2
+
+        # クリック前後の視線データを抽出
+        window_before_sec = window_before_ms / 1000.0
+        window_after_sec = window_after_ms / 1000.0
+        mask = (
+            (gaze_df['timestamp_sec'] >= click_time - window_before_sec) &
+            (gaze_df['timestamp_sec'] <= click_time + window_after_sec)
+        )
+        gaze_window = gaze_df[mask]
+
+        if len(gaze_window) < min_samples:
+            continue
+
+        # 観測位置の中央値
+        observed_x = gaze_window['gaze_x'].median()
+        observed_y = gaze_window['gaze_y'].median()
+
+        # オフセット計算
+        offset_x = expected_x - observed_x
+        offset_y = expected_y - observed_y
+
+        # 外れ値チェック
+        offset_magnitude = np.sqrt(offset_x**2 + offset_y**2)
+        if offset_magnitude > outlier_threshold_px:
+            continue
+
+        # segment_idはanalog_idがあればそれを使う（セグメント構造と一致させる）
+        segment_id = analog_id if analog_id else passage_id
+        reference_points.append({
+            'timestamp': click_time,
+            'segment_id': segment_id,
+            'question_id': question_id,
+            'choice_id': choice_id,
+            'click_type': 'choice',
+            'expected_x': expected_x,
+            'expected_y': expected_y,
+            'observed_x': observed_x,
+            'observed_y': observed_y,
+            'n_samples': len(gaze_window),
+            'offset_x': offset_x,
+            'offset_y': offset_y
+        })
+
+    # 5. 各answer_submitイベントに対して参照点を抽出
+    window_before_sec = window_before_ms / 1000.0
+    window_after_sec = window_after_ms / 1000.0
+
+    for submit in submit_events:
+        passage_id = submit['passage_id']
+        analog_id = submit.get('analog_id')
+        submit_time = submit['timestamp']
+
+        # 座標データを取得（analog_idがあればそれを優先、なければpassage_id）
+        coord_key = analog_id if analog_id else passage_id
+        if coord_key not in coord_data:
+            continue
+        coords = coord_data[coord_key]
+
+        # footer.submit_button または confirm_button を取得
+        # (analog_questionでは confirm_button が使われる)
+        footer = coords.get('footer', {})
+        submit_button = footer.get('submit_button') or footer.get('confirm_button')
+
+        if not submit_button:
+            continue
+
+        # submit_button中心を期待位置とする
+        expected_x = submit_button['x'] + submit_button['width'] / 2
+        expected_y = submit_button['y'] + submit_button['height'] / 2
+
+        # クリック前後の視線データを抽出
+        mask = (
+            (gaze_df['timestamp_sec'] >= submit_time - window_before_sec) &
+            (gaze_df['timestamp_sec'] <= submit_time + window_after_sec)
+        )
+        gaze_window = gaze_df[mask]
+
+        if len(gaze_window) < min_samples:
+            continue
+
+        # 観測位置の中央値
+        observed_x = gaze_window['gaze_x'].median()
+        observed_y = gaze_window['gaze_y'].median()
+
+        # オフセット計算
+        offset_x = expected_x - observed_x
+        offset_y = expected_y - observed_y
+
+        # 外れ値チェック
+        offset_magnitude = np.sqrt(offset_x**2 + offset_y**2)
+        if offset_magnitude > outlier_threshold_px:
+            continue
+
+        # segment_idはanalog_idがあればそれを使用
+        segment_id = analog_id if analog_id else passage_id
+
+        reference_points.append({
+            'timestamp': submit_time,
+            'segment_id': segment_id,
+            'question_id': None,
+            'choice_id': None,
+            'click_type': 'submit',
+            'expected_x': expected_x,
+            'expected_y': expected_y,
+            'observed_x': observed_x,
+            'observed_y': observed_y,
+            'n_samples': len(gaze_window),
+            'offset_x': offset_x,
+            'offset_y': offset_y
+        })
+
+    # 6. タブクリックイベントから参照点を抽出
+    # locale_tab_click, question_tab_click, analog_tab_click
+    for tab in tab_events:
+        tab_time = tab['timestamp']
+        event_type = tab['event_type']
+        passage_id = tab.get('passage_id')
+        analog_id = tab.get('analog_id')
+
+        # 座標ファイルを特定
+        # タブイベントは解説画面(training_explanation, analog_explanation)またはreflection2で発生
+        coords = None
+
+        # analog_idがある場合はanalog_explanation画面
+        if analog_id:
+            key = ('analog_explanation', passage_id, analog_id)
+            coords = extra_coord_data.get(key)
+        # analog_tab_clickはreflection2画面でのみ発生
+        elif event_type == 'analog_tab_click':
+            key = ('reflection2', passage_id, None)
+            coords = extra_coord_data.get(key)
+        # それ以外はtraining_explanation画面
+        else:
+            key = ('training_explanation', passage_id, None)
+            coords = extra_coord_data.get(key)
+
+        if not coords:
+            continue
+
+        header = coords.get('header', {})
+
+        # タブ種別に応じてbboxを取得
+        expected_bbox = None
+        if event_type == 'locale_tab_click':
+            locale = tab.get('locale')
+            locale_tabs = header.get('locale_tabs', [])
+            for lt in locale_tabs:
+                if lt.get('locale') == locale:
+                    expected_bbox = lt.get('bbox')
+                    break
+        elif event_type == 'question_tab_click':
+            question_index = tab.get('question_index')
+            question_tabs = header.get('question_tabs', [])
+            for qt in question_tabs:
+                if qt.get('question_index') == question_index:
+                    expected_bbox = qt.get('bbox')
+                    break
+        elif event_type == 'analog_tab_click':
+            analog_index = tab.get('analog_index')
+            analog_tabs = header.get('analog_tabs', [])
+            for at in analog_tabs:
+                if at.get('analog_index') == analog_index:
+                    expected_bbox = at.get('bbox')
+                    break
+
+        if not expected_bbox:
+            continue
+
+        # 期待位置: bbox中心
+        expected_x = expected_bbox['x'] + expected_bbox['width'] / 2
+        expected_y = expected_bbox['y'] + expected_bbox['height'] / 2
+
+        # クリック前後の視線データを抽出
+        mask = (
+            (gaze_df['timestamp_sec'] >= tab_time - window_before_sec) &
+            (gaze_df['timestamp_sec'] <= tab_time + window_after_sec)
+        )
+        gaze_window = gaze_df[mask]
+
+        if len(gaze_window) < min_samples:
+            continue
+
+        observed_x = gaze_window['gaze_x'].median()
+        observed_y = gaze_window['gaze_y'].median()
+
+        offset_x = expected_x - observed_x
+        offset_y = expected_y - observed_y
+
+        offset_magnitude = np.sqrt(offset_x**2 + offset_y**2)
+        if offset_magnitude > outlier_threshold_px:
+            continue
+
+        # segment_idは解説画面に対応（analog_idがあればそれを使用）
+        segment_id = analog_id if analog_id else passage_id
+
+        reference_points.append({
+            'timestamp': tab_time,
+            'segment_id': segment_id,
+            'question_id': None,
+            'choice_id': None,
+            'click_type': event_type,
+            'expected_x': expected_x,
+            'expected_y': expected_y,
+            'observed_x': observed_x,
+            'observed_y': observed_y,
+            'n_samples': len(gaze_window),
+            'offset_x': offset_x,
+            'offset_y': offset_y
+        })
+
+    # 7. 終了イベント（reflection_submit, explanation_exit）から参照点を抽出
+    # これらはfooter.submit_buttonを使用
+    for evt in exit_events:
+        evt_time = evt['timestamp']
+        event_type = evt['event_type']
+        passage_id = evt.get('passage_id')
+        analog_id = evt.get('analog_id')
+        coord_type = evt.get('coord_type')
+
+        # 座標ファイルを取得
+        key = (coord_type, passage_id, analog_id)
+        coords = extra_coord_data.get(key)
+
+        if not coords:
+            continue
+
+        footer = coords.get('footer', {})
+        submit_button = footer.get('submit_button')
+
+        if not submit_button:
+            continue
+
+        expected_x = submit_button['x'] + submit_button['width'] / 2
+        expected_y = submit_button['y'] + submit_button['height'] / 2
+
+        mask = (
+            (gaze_df['timestamp_sec'] >= evt_time - window_before_sec) &
+            (gaze_df['timestamp_sec'] <= evt_time + window_after_sec)
+        )
+        gaze_window = gaze_df[mask]
+
+        if len(gaze_window) < min_samples:
+            continue
+
+        observed_x = gaze_window['gaze_x'].median()
+        observed_y = gaze_window['gaze_y'].median()
+
+        offset_x = expected_x - observed_x
+        offset_y = expected_y - observed_y
+
+        offset_magnitude = np.sqrt(offset_x**2 + offset_y**2)
+        if offset_magnitude > outlier_threshold_px:
+            continue
+
+        # segment_idは対応する画面に合わせる
+        # reflection画面はpassage_id、explanation画面はanalog_idがあればそれを使用
+        segment_id = analog_id if analog_id else passage_id
+
+        reference_points.append({
+            'timestamp': evt_time,
+            'segment_id': segment_id,
+            'question_id': None,
+            'choice_id': None,
+            'click_type': event_type,
+            'expected_x': expected_x,
+            'expected_y': expected_y,
+            'observed_x': observed_x,
+            'observed_y': observed_y,
+            'n_samples': len(gaze_window),
+            'offset_x': offset_x,
+            'offset_y': offset_y
+        })
+
+    return pd.DataFrame(reference_points)
+
+
+def estimateSegmentCorrections(reference_points, segments, center_x=960, center_y=540,
+                               prefer_scaling=False, max_offset=None):
+    """
+    セグメントごとの補正パラメータ（スケーリング + オフセット）を推定
+
+    参照点が不足するセグメントは前後のセグメントから線形補間する。
+
+    変換モデル:
+        expected = scale * (observed - center) + center + offset
+    整理すると:
+        d_expected = scale * d_observed + offset
+        where: d_expected = expected - center, d_observed = observed - center
+
+    これは線形回帰 y = a*x + b と同形（a=scale, b=offset）。
+
+    Parameters:
+    -----------
+    reference_points : pd.DataFrame
+        extractClickReferencePoints()の戻り値
+    segments : list of dict
+        セグメント情報のリスト。各要素に'passage_id', 'start_time', 'end_time'を含む
+    center_x, center_y : float
+        スケーリングの中心座標（デフォルト: 画面中心 960, 540）
+    prefer_scaling : bool
+        Trueの場合、スケーリング重視モードを使用。
+        まずスケーリングのみで補正を試み、残差からオフセットを計算する。
+        右側ボタンで計算したオフセットを左側テキストに適用する問題を回避する。
+    max_offset : float or None
+        オフセットの最大絶対値（ピクセル）。Noneの場合は制限なし。
+        prefer_scaling=True時に特に有効。
+
+    Returns:
+    --------
+    pd.DataFrame
+        セグメントごとの補正パラメータ。カラム:
+        - segment_id: セグメント識別子
+        - segment_index: セグメントのインデックス
+        - scale_x, scale_y: スケーリング係数（1.0 = 変化なし）
+        - offset_x, offset_y: 補正オフセット（ピクセル）
+        - n_reference_points: 使用した参照点数
+        - method: 'direct'（2点以上）| 'single_point'（1点）| 'interpolated'（補間）| 'none'
+                  prefer_scaling=Trueの場合は 'scaling_priority' を使用
+    """
+    import pandas as pd
+    import numpy as np
+
+    if reference_points.empty:
+        # 参照点がない場合は全セグメントに対してデフォルト補正
+        return pd.DataFrame([{
+            'segment_id': seg.get('analog_id') or seg.get('passage_id'),
+            'segment_index': i,
+            'scale_x': 1.0,
+            'scale_y': 1.0,
+            'offset_x': 0.0,
+            'offset_y': 0.0,
+            'n_reference_points': 0,
+            'method': 'none'
+        } for i, seg in enumerate(segments)])
+
+    # セグメントごとに参照点を集計
+    segment_corrections = []
+
+    for i, seg in enumerate(segments):
+        # analog_idがあればそれを使用、なければpassage_id
+        analog_id = seg.get('analog_id')
+        passage_id = seg.get('passage_id')
+        seg_id = analog_id if analog_id else passage_id
+        if not seg_id:
+            continue
+
+        # このセグメントの参照点（segment_id + 時間範囲でマッチング）
+        # 同じsegment_idを持つ複数のセグメント（例: question画面とexplanation画面）を区別
+        start_time = seg.get('start_time')
+        end_time = seg.get('end_time')
+
+        if start_time is not None and end_time is not None:
+            # 時間範囲でフィルタリング
+            seg_refs = reference_points[
+                (reference_points['segment_id'] == seg_id) &
+                (reference_points['timestamp'] >= start_time) &
+                (reference_points['timestamp'] < end_time)
+            ]
+        else:
+            # フォールバック: segment_idのみでマッチング
+            seg_refs = reference_points[reference_points['segment_id'] == seg_id]
+
+        if len(seg_refs) >= 2:
+            # 2点以上: scale + offsetを推定
+            # d_expected = scale * d_observed + offset
+            d_observed_x = seg_refs['observed_x'].values - center_x
+            d_observed_y = seg_refs['observed_y'].values - center_y
+            d_expected_x = seg_refs['expected_x'].values - center_x
+            d_expected_y = seg_refs['expected_y'].values - center_y
+
+            if prefer_scaling:
+                # スケーリング重視モード:
+                # Step 1: スケーリングのみ推定（切片=0で回帰）
+                # d_expected = scale * d_observed
+                # scale = sum(d_expected * d_observed) / sum(d_observed^2)
+                dot_xx = np.dot(d_observed_x, d_observed_x)
+                dot_yy = np.dot(d_observed_y, d_observed_y)
+
+                if dot_xx > 1e-6:
+                    scale_x = np.dot(d_observed_x, d_expected_x) / dot_xx
+                else:
+                    scale_x = 1.0
+
+                if dot_yy > 1e-6:
+                    scale_y = np.dot(d_observed_y, d_expected_y) / dot_yy
+                else:
+                    scale_y = 1.0
+
+                # スケーリングの妥当性チェック（0.8〜1.2の範囲外なら1.0にクランプ）
+                if not (0.8 <= scale_x <= 1.2):
+                    scale_x = 1.0
+                if not (0.8 <= scale_y <= 1.2):
+                    scale_y = 1.0
+
+                # Step 2: 残差からオフセット計算（制限付き）
+                residual_x = d_expected_x - scale_x * d_observed_x
+                residual_y = d_expected_y - scale_y * d_observed_y
+                offset_x = np.mean(residual_x)
+                offset_y = np.mean(residual_y)
+
+                # max_offsetで制限
+                if max_offset is not None:
+                    offset_x = np.clip(offset_x, -max_offset, max_offset)
+                    offset_y = np.clip(offset_y, -max_offset, max_offset)
+
+                method = 'scaling_priority'
+            else:
+                # 従来の最小二乗法でscale + offsetを同時推定
+                # X軸の最小二乗フィット: [[d_obs, 1], ...] @ [scale, offset] = [d_exp, ...]
+                A_x = np.column_stack([d_observed_x, np.ones(len(seg_refs))])
+                result_x, _, _, _ = np.linalg.lstsq(A_x, d_expected_x, rcond=None)
+                scale_x, offset_x = result_x
+
+                # Y軸の最小二乗フィット
+                A_y = np.column_stack([d_observed_y, np.ones(len(seg_refs))])
+                result_y, _, _, _ = np.linalg.lstsq(A_y, d_expected_y, rcond=None)
+                scale_y, offset_y = result_y
+
+                # スケーリングの妥当性チェック（0.8〜1.2の範囲外なら1.0にクランプ）
+                if not (0.8 <= scale_x <= 1.2):
+                    scale_x = 1.0
+                    offset_x = seg_refs['offset_x'].mean()
+                if not (0.8 <= scale_y <= 1.2):
+                    scale_y = 1.0
+                    offset_y = seg_refs['offset_y'].mean()
+
+                # max_offsetで制限（従来モードでも適用可能）
+                if max_offset is not None:
+                    offset_x = np.clip(offset_x, -max_offset, max_offset)
+                    offset_y = np.clip(offset_y, -max_offset, max_offset)
+
+                method = 'direct'
+
+            n_refs = len(seg_refs)
+        elif len(seg_refs) == 1:
+            # 1点: スケーリングは推定不可、オフセットのみ
+            scale_x = 1.0
+            scale_y = 1.0
+            offset_x = seg_refs['offset_x'].iloc[0]
+            offset_y = seg_refs['offset_y'].iloc[0]
+
+            # max_offsetで制限
+            if max_offset is not None:
+                offset_x = np.clip(offset_x, -max_offset, max_offset)
+                offset_y = np.clip(offset_y, -max_offset, max_offset)
+
+            method = 'single_point'
+            n_refs = 1
+        else:
+            # 0点: 後で補間
+            scale_x = None
+            scale_y = None
+            offset_x = None
+            offset_y = None
+            method = 'interpolated'
+            n_refs = 0
+
+        segment_corrections.append({
+            'segment_id': seg_id,
+            'segment_index': i,
+            'event_type': seg.get('event_type'),  # intro/complete画面の識別用
+            'scale_x': scale_x,
+            'scale_y': scale_y,
+            'offset_x': offset_x,
+            'offset_y': offset_y,
+            'n_reference_points': n_refs,
+            'method': method
+        })
+
+    corrections_df = pd.DataFrame(segment_corrections)
+
+    # 補間処理
+    needs_interpolation = corrections_df['method'] == 'interpolated'
+    if needs_interpolation.any():
+        # 有効な補正値を持つセグメントのインデックスと値を取得
+        valid_mask = corrections_df['method'].isin(['direct', 'single_point', 'scaling_priority'])
+        valid_indices = corrections_df.loc[valid_mask, 'segment_index'].values
+        valid_scale_x = corrections_df.loc[valid_mask, 'scale_x'].values
+        valid_scale_y = corrections_df.loc[valid_mask, 'scale_y'].values
+        valid_offset_x = corrections_df.loc[valid_mask, 'offset_x'].values
+        valid_offset_y = corrections_df.loc[valid_mask, 'offset_y'].values
+
+        if len(valid_indices) == 0:
+            # 有効な参照点が全くない場合はデフォルト補正
+            corrections_df.loc[needs_interpolation, 'scale_x'] = 1.0
+            corrections_df.loc[needs_interpolation, 'scale_y'] = 1.0
+            corrections_df.loc[needs_interpolation, 'offset_x'] = 0.0
+            corrections_df.loc[needs_interpolation, 'offset_y'] = 0.0
+            corrections_df.loc[needs_interpolation, 'method'] = 'none'
+        elif len(valid_indices) == 1:
+            # 1つの有効値しかない場合はそれを全体に適用
+            corrections_df.loc[needs_interpolation, 'scale_x'] = valid_scale_x[0]
+            corrections_df.loc[needs_interpolation, 'scale_y'] = valid_scale_y[0]
+            corrections_df.loc[needs_interpolation, 'offset_x'] = valid_offset_x[0]
+            corrections_df.loc[needs_interpolation, 'offset_y'] = valid_offset_y[0]
+        else:
+            # 線形補間
+            for idx in corrections_df[needs_interpolation].index:
+                seg_idx = corrections_df.loc[idx, 'segment_index']
+
+                # 前後の有効なセグメントを探す
+                before_mask = valid_indices < seg_idx
+                after_mask = valid_indices > seg_idx
+
+                if before_mask.any() and after_mask.any():
+                    # 前後両方ある: 線形補間
+                    before_idx = valid_indices[before_mask][-1]
+                    after_idx = valid_indices[after_mask][0]
+                    before_scale_x = valid_scale_x[valid_indices == before_idx][0]
+                    before_scale_y = valid_scale_y[valid_indices == before_idx][0]
+                    before_offset_x = valid_offset_x[valid_indices == before_idx][0]
+                    before_offset_y = valid_offset_y[valid_indices == before_idx][0]
+                    after_scale_x = valid_scale_x[valid_indices == after_idx][0]
+                    after_scale_y = valid_scale_y[valid_indices == after_idx][0]
+                    after_offset_x = valid_offset_x[valid_indices == after_idx][0]
+                    after_offset_y = valid_offset_y[valid_indices == after_idx][0]
+
+                    # 重み付き平均
+                    weight = (seg_idx - before_idx) / (after_idx - before_idx)
+                    corrections_df.loc[idx, 'scale_x'] = before_scale_x + weight * (after_scale_x - before_scale_x)
+                    corrections_df.loc[idx, 'scale_y'] = before_scale_y + weight * (after_scale_y - before_scale_y)
+                    corrections_df.loc[idx, 'offset_x'] = before_offset_x + weight * (after_offset_x - before_offset_x)
+                    corrections_df.loc[idx, 'offset_y'] = before_offset_y + weight * (after_offset_y - before_offset_y)
+                elif before_mask.any():
+                    # 前だけある: 前の値を使用
+                    before_idx = valid_indices[before_mask][-1]
+                    corrections_df.loc[idx, 'scale_x'] = valid_scale_x[valid_indices == before_idx][0]
+                    corrections_df.loc[idx, 'scale_y'] = valid_scale_y[valid_indices == before_idx][0]
+                    corrections_df.loc[idx, 'offset_x'] = valid_offset_x[valid_indices == before_idx][0]
+                    corrections_df.loc[idx, 'offset_y'] = valid_offset_y[valid_indices == before_idx][0]
+                elif after_mask.any():
+                    # 後だけある: 後の値を使用
+                    after_idx = valid_indices[after_mask][0]
+                    corrections_df.loc[idx, 'scale_x'] = valid_scale_x[valid_indices == after_idx][0]
+                    corrections_df.loc[idx, 'scale_y'] = valid_scale_y[valid_indices == after_idx][0]
+                    corrections_df.loc[idx, 'offset_x'] = valid_offset_x[valid_indices == after_idx][0]
+                    corrections_df.loc[idx, 'offset_y'] = valid_offset_y[valid_indices == after_idx][0]
+
+    return corrections_df
+
+
+def applyCorrectionToSegment(gaze_data, offset_x, offset_y):
+    """
+    セグメントの視線データに補正を適用
+
+    Parameters:
+    -----------
+    gaze_data : np.ndarray
+        視線データ。形状は(N, 4)以上。[:, 1]がX座標、[:, 2]がY座標
+    offset_x : float
+        X方向のオフセット（ピクセル）
+    offset_y : float
+        Y方向のオフセット（ピクセル）
+
+    Returns:
+    --------
+    np.ndarray
+        補正後の視線データ
+    """
+    corrected = gaze_data.copy()
+    corrected[:, 1] = gaze_data[:, 1] + offset_x
+    corrected[:, 2] = gaze_data[:, 2] + offset_y
+    return corrected
+
+
+def validateSegmentCorrection(fixations, aois, original_rate=None, tolerance=0.0):
+    """
+    AOIマッチ率で補正効果を検証
+
+    Parameters:
+    -----------
+    fixations : np.ndarray
+        Fixationデータ (N, 8)。[:, 1]がX座標、[:, 2]がY座標
+    aois : list of dict
+        AOIリスト
+    original_rate : float, optional
+        補正前のAOI内率。指定するとimprovementを計算
+    tolerance : float
+        AOI境界からの許容距離（ピクセル）。デフォルト0.0（厳密判定）
+
+    Returns:
+    --------
+    dict
+        {
+            'aoi_rate': float,       # 補正後のAOI内率
+            'improvement': float,    # 補正前との差（original_rate指定時のみ）
+            'n_fixations': int,      # 総Fixation数
+            'n_in_aoi': int          # AOI内のFixation数
+        }
+    """
+    if len(fixations) == 0:
+        return {
+            'aoi_rate': 0.0,
+            'improvement': 0.0 if original_rate is not None else None,
+            'n_fixations': 0,
+            'n_in_aoi': 0
+        }
+
+    rate_info = computeAllAOIRate(fixations, aois, tolerance)
+
+    result = {
+        'aoi_rate': rate_info['rate'],
+        'n_fixations': rate_info['total_fixations'],
+        'n_in_aoi': rate_info['fixations_in_aoi']
+    }
+
+    if original_rate is not None:
+        result['improvement'] = rate_info['rate'] - original_rate
+    else:
+        result['improvement'] = None
+
+    return result
+
+
+def _validate_segment_worker(task):
+    """
+    セグメント検証のワーカー関数（並列処理用）
+
+    Parameters:
+    -----------
+    task : dict
+        検証に必要なデータを含む辞書
+
+    Returns:
+    --------
+    dict or None
+        検証結果、またはスキップ時はNone
+    """
+    segment_index = task['segment_index']
+    seg_id = task['seg_id']
+    data = task['data']
+    coord_path = task['coord_path']
+    scale_x = task['scale_x']
+    scale_y = task['scale_y']
+    offset_x = task['offset_x']
+    offset_y = task['offset_y']
+    method = task['method']
+    tolerance = task['tolerance']
+
+    try:
+        # 座標を読み込み
+        coordinates = loadCoordinates(coord_path)
+        aois = extractAllAOIs(coordinates)
+
+        # Fixationを検出
+        times = data[:, 0]
+        X = data[:, 1]
+        Y = data[:, 2]
+        P = data[:, 3] if data.shape[1] > 3 else None
+
+        if len(times) < 10:
+            return None
+
+        fixations = detectFixations(times, X, Y, P)
+        if len(fixations) == 0:
+            return None
+
+        # 補正前のAOI内率
+        original_rate_info = computeAllAOIRate(fixations, aois, tolerance)
+        original_rate = original_rate_info['rate']
+
+        # Stage 1: Click-Anchored補正を適用
+        stage1_fixations = applyScalingAndOffset(
+            fixations, scale_x, scale_y, offset_x, offset_y, 960, 540
+        )
+        stage1_rate_info = computeAllAOIRate(stage1_fixations, aois, tolerance)
+        stage1_rate = stage1_rate_info['rate']
+
+        # Stage 2: AOI Optimized補正（グリッドサーチ）
+        stage2_result = estimateOffsetWithScaling(
+            stage1_fixations, aois,
+            search_range_x=(-20, 20),
+            search_range_y=(-30, 30),
+            scale_range=(0.90, 1.30),
+            offset_step=5,
+            scale_step=0.02,
+            tolerance=tolerance,
+            verbose=False
+        )
+
+        s2_scale_x = stage2_result['best_scale_x']
+        s2_scale_y = stage2_result['best_scale_y']
+        s2_offset_x = stage2_result['best_offset_x']
+        s2_offset_y = stage2_result['best_offset_y']
+
+        # Stage 2を適用
+        stage2_fixations = applyScalingAndOffset(
+            stage1_fixations, s2_scale_x, s2_scale_y, s2_offset_x, s2_offset_y
+        )
+        stage2_rate_info = computeAllAOIRate(stage2_fixations, aois, tolerance)
+        stage2_rate = stage2_rate_info['rate']
+
+        # 最終補正パラメータ（Stage1 + Stage2の合成）
+        final_scale_x = scale_x * s2_scale_x
+        final_scale_y = scale_y * s2_scale_y
+        final_offset_x = s2_scale_x * offset_x + s2_offset_x
+        final_offset_y = s2_scale_y * offset_y + s2_offset_y
+
+        return {
+            'segment_id': seg_id,
+            'segment_index': segment_index,
+            'original_rate': original_rate,
+            'stage1_rate': stage1_rate,
+            'corrected_rate': stage2_rate,
+            'improvement': stage2_rate - original_rate,
+            'n_fixations': len(stage2_fixations),
+            'scale_x': final_scale_x,
+            'scale_y': final_scale_y,
+            'offset_x': final_offset_x,
+            'offset_y': final_offset_y,
+            's2_scale_x': s2_scale_x,
+            's2_scale_y': s2_scale_y,
+            's2_offset_x': s2_offset_x,
+            's2_offset_y': s2_offset_y,
+            'method': method
+        }
+    except Exception as e:
+        print(f"Error processing segment {seg_id}: {e}")
+        return None
+
+
+def runClickAnchoredCorrection(eye_tracking_dir, event_log_path, coord_dir, phase="pre",
+                                window_before_ms=200, window_after_ms=50,
+                                min_samples=5, outlier_threshold_px=300,
+                                output_dir=None, tolerance=0.0,
+                                prefer_scaling=False, max_offset=None,
+                                verbose=True):
+    """
+    Click-Anchored Correction パイプラインを実行
+
+    クリックイベントを参照点として視線データを補正し、
+    セグメントごとの補正パラメータと検証結果を返す。
+
+    Parameters:
+    -----------
+    eye_tracking_dir : str
+        eye_trackingディレクトリ（tobii_pro_gaze.csvと背景画像を含む）
+    event_log_path : str
+        イベントログファイルのパス (.jsonl)
+    coord_dir : str
+        座標JSONファイルが格納されているディレクトリ
+    phase : str
+        フェーズ名（"pre", "post", "training1", "training2", "training3"）
+    window_before_ms : float
+        クリック前の視線サンプル取得時間（ミリ秒）
+    window_after_ms : float
+        クリック後の視線サンプル取得時間（ミリ秒）
+    min_samples : int
+        参照点に必要な最小視線サンプル数
+    outlier_threshold_px : float
+        外れ値除外の閾値（ピクセル）
+    output_dir : str, optional
+        結果を保存するディレクトリ。Noneの場合は保存しない
+    tolerance : float
+        AOI境界からの許容距離（ピクセル）。デフォルト0.0（厳密判定）
+    prefer_scaling : bool
+        Trueの場合、スケーリング重視モードを使用。
+        まずスケーリングのみで補正を試み、残差からオフセットを計算する。
+    max_offset : float or None
+        オフセットの最大絶対値（ピクセル）。Noneの場合は制限なし。
+    verbose : bool
+        進捗を表示するか
+
+    Returns:
+    --------
+    dict
+        {
+            'reference_points': pd.DataFrame,   # 参照点データ
+            'segment_corrections': pd.DataFrame, # セグメントごとの補正値
+            'validation_results': list of dict,  # 各セグメントの検証結果
+            'summary': dict                      # 全体のサマリー
+        }
+    """
+    import json
+
+    gaze_csv_path = os.path.join(eye_tracking_dir, "tobii_pro_gaze.csv")
+
+    if verbose:
+        print(f"Phase: {phase}")
+        print(f"Gaze CSV: {gaze_csv_path}")
+        print(f"Event log: {event_log_path}")
+        print(f"Coordinates dir: {coord_dir}")
+        print()
+
+    # 1. 参照点を抽出
+    if verbose:
+        print("Step 1: Extracting click reference points...")
+    reference_points = extractClickReferencePoints(
+        event_log_path, coord_dir, gaze_csv_path,
+        window_before_ms=window_before_ms,
+        window_after_ms=window_after_ms,
+        min_samples=min_samples,
+        outlier_threshold_px=outlier_threshold_px
+    )
+    if verbose:
+        print(f"  Found {len(reference_points)} reference points")
+
+    # 2. セグメントを読み込み
+    if verbose:
+        print("Step 2: Loading segments...")
+    segments = readTobiiData(eye_tracking_dir, event_log_path, phase=phase,
+                             apply_head_correction=False)
+    if verbose:
+        print(f"  Found {len(segments)} segments")
+
+    # 3. セグメントごとの補正パラメータを推定
+    if verbose:
+        print("Step 3: Estimating segment corrections...")
+    segment_corrections = estimateSegmentCorrections(
+        reference_points, segments,
+        prefer_scaling=prefer_scaling,
+        max_offset=max_offset
+    )
+    if verbose:
+        direct_count = (segment_corrections['method'] == 'direct').sum()
+        single_count = (segment_corrections['method'] == 'single_point').sum()
+        interp_count = (segment_corrections['method'] == 'interpolated').sum()
+        print(f"  Direct: {direct_count}, Single point: {single_count}, Interpolated: {interp_count}")
+
+    # 4. 各セグメントに補正を適用して検証（並列処理）
+    if verbose:
+        print("Step 4: Validating corrections (parallel)...")
+
+    # 座標マッピングを事前に作成（高速化）
+    coord_mapping = buildCoordinateMapping(coord_dir)
+
+    # 並列処理用のタスクを準備
+    tasks = []
+    for i, seg in enumerate(segments):
+        seg_id = seg.get('analog_id') or seg.get('passage_id')
+        data = seg.get('data')
+
+        if data is None or len(data) == 0:
+            continue
+
+        # マッピングから座標パスを取得（複合キーを使用）
+        event_type = seg.get('event_type', '')
+        prefix = _eventTypeToCoordPrefix(event_type)
+        coord_path = coord_mapping.get((prefix, seg_id))
+        # intro/complete画面はseg_id=Noneでマップされているのでフォールバック
+        if not coord_path and prefix in ('training_intro', 'analog_intro', 'training_complete'):
+            coord_path = coord_mapping.get((prefix, None))
+        if not coord_path:
+            continue
+
+        # 補正パラメータを取得
+        seg_correction = segment_corrections[segment_corrections['segment_index'] == i]
+        if seg_correction.empty:
+            continue
+
+        scale_x = seg_correction['scale_x'].iloc[0]
+        scale_y = seg_correction['scale_y'].iloc[0]
+        offset_x = seg_correction['offset_x'].iloc[0]
+        offset_y = seg_correction['offset_y'].iloc[0]
+        method = seg_correction['method'].iloc[0]
+
+        if scale_x is None or scale_y is None:
+            scale_x, scale_y = 1.0, 1.0
+        if offset_x is None or offset_y is None:
+            offset_x, offset_y = 0.0, 0.0
+
+        tasks.append({
+            'segment_index': i,
+            'seg_id': seg_id,
+            'data': data,
+            'coord_path': coord_path,
+            'scale_x': scale_x,
+            'scale_y': scale_y,
+            'offset_x': offset_x,
+            'offset_y': offset_y,
+            'method': method,
+            'tolerance': tolerance
+        })
+
+    # 並列処理でセグメントを検証
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    n_workers = min(len(tasks), 80)
+    validation_results = []
+
+    if tasks:
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(_validate_segment_worker, task): task for task in tasks}
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    validation_results.append(result)
+
+        # segment_indexでソート
+        validation_results.sort(key=lambda x: x['segment_index'])
+
+    # サマリー計算
+    if validation_results:
+        summary = {
+            'n_segments': len(validation_results),
+            'n_reference_points': len(reference_points),
+            'mean_original_rate': np.mean([v['original_rate'] for v in validation_results]),
+            'mean_stage1_rate': np.mean([v['stage1_rate'] for v in validation_results]),
+            'mean_corrected_rate': np.mean([v['corrected_rate'] for v in validation_results]),
+            'mean_improvement': np.mean([v['improvement'] for v in validation_results]),
+            'mean_scale_x': np.mean([v['scale_x'] for v in validation_results]),
+            'mean_scale_y': np.mean([v['scale_y'] for v in validation_results]),
+            'mean_offset_x': np.mean([v['offset_x'] for v in validation_results]),
+            'mean_offset_y': np.mean([v['offset_y'] for v in validation_results])
+        }
+    else:
+        summary = {
+            'n_segments': 0,
+            'n_reference_points': len(reference_points),
+            'mean_original_rate': 0.0,
+            'mean_stage1_rate': 0.0,
+            'mean_corrected_rate': 0.0,
+            'mean_improvement': 0.0,
+            'mean_scale_x': 1.0,
+            'mean_scale_y': 1.0,
+            'mean_offset_x': 0.0,
+            'mean_offset_y': 0.0
+        }
+
+    if verbose:
+        print()
+        print("=== Summary ===")
+        print(f"  Segments analyzed: {summary['n_segments']}")
+        print(f"  Reference points: {summary['n_reference_points']}")
+        print(f"  Original AOI rate: {summary['mean_original_rate']:.3f}")
+        print(f"  Stage 1 AOI rate: {summary['mean_stage1_rate']:.3f}")
+        print(f"  Corrected AOI rate (Stage 2): {summary['mean_corrected_rate']:.3f}")
+        print(f"  Improvement: {summary['mean_improvement']:+.3f}")
+        print(f"  Mean scale: ({summary['mean_scale_x']:.4f}, {summary['mean_scale_y']:.4f})")
+        print(f"  Mean offset: ({summary['mean_offset_x']:.1f}, {summary['mean_offset_y']:.1f}) px")
+
+    # 結果を保存
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
+        reference_points.to_csv(
+            os.path.join(output_dir, 'reference_points.csv'),
+            index=False
+        )
+        segment_corrections.to_csv(
+            os.path.join(output_dir, 'segment_corrections.csv'),
+            index=False
+        )
+        with open(os.path.join(output_dir, 'validation_results.json'), 'w') as f:
+            json.dump({
+                'validation_results': validation_results,
+                'summary': summary
+            }, f, indent=2)
+
+        if verbose:
+            print(f"\nResults saved to: {output_dir}")
+
+    return {
+        'reference_points': reference_points,
+        'segment_corrections': segment_corrections,
+        'validation_results': validation_results,
+        'summary': summary
+    }
+
+
+# =============================================================================
+# 並列処理用ワーカー関数
+# =============================================================================
+
+def process_segment_worker(args):
+    """
+    1セグメントを処理するワーカー関数（ProcessPoolExecutorで並列実行用）
+
+    eyegaze.pyモジュールレベルで定義することでPickle化可能にする
+
+    Parameters:
+    -----------
+    args : tuple
+        (segment_index, segment_id, segment_data, image_path, coord_path,
+         correction_dict, tolerance, save_path, aoi_levels, fixation_size)
+
+        segment_index: セグメントのインデックス（同じsegment_idを持つ複数セグメントを区別）
+        segment_id: セグメント識別子（analog_id or passage_id）
+        segment_data: セグメントの視線データ (np.ndarray)
+        image_path: 背景画像のパス
+        coord_path: 座標JSONファイルのパス
+
+    Returns:
+    --------
+    dict
+        処理結果 {"success": bool, "segment_id": str, "segment_index": int, "error": str or None}
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+
+    # 引数を展開
+    (segment_index, segment_id, segment_data, image_path, coord_path,
+     correction_dict, tolerance, save_path, aoi_levels, fixation_size) = args
+
+    try:
+        data = segment_data
+
+        # 座標パスがない場合はスキップ
+        if not coord_path:
+            return {"success": False, "segment_id": segment_id, "segment_index": segment_index, "error": "Coordinates not found"}
+        coordinates = loadCoordinates(coord_path)
+        aois = extractAllAOIs(coordinates, levels=aoi_levels)
+
+        # Fixationを検出
+        times, X, Y, P = data[:, 0], data[:, 1], data[:, 2], data[:, 3]
+        fixations = detectFixations(times, X, Y, P)
+
+        if len(fixations) == 0:
+            return {"success": False, "segment_id": segment_id, "segment_index": segment_index, "error": "No fixations"}
+
+        # オリジナルのAOI Rate
+        original_rate_info = computeAllAOIRate(fixations, aois, tolerance=tolerance)
+        original_rate = original_rate_info['rate']
+
+        # --- 第1段階: Click-Anchored補正パラメータを取得 ---
+        s1_scale_x = correction_dict.get('scale_x', 1.0) or 1.0
+        s1_scale_y = correction_dict.get('scale_y', 1.0) or 1.0
+        s1_offset_x = correction_dict.get('offset_x', 0.0) or 0.0
+        s1_offset_y = correction_dict.get('offset_y', 0.0) or 0.0
+
+        # 第1段階の補正を適用
+        stage1_fixations = applyScalingAndOffset(
+            fixations, s1_scale_x, s1_scale_y, s1_offset_x, s1_offset_y
+        )
+        stage1_rate_info = computeAllAOIRate(stage1_fixations, aois, tolerance=tolerance)
+        stage1_rate = stage1_rate_info['rate']
+
+        # --- 第2段階: AOI Rate最適化による微調整 ---
+        stage2_result = estimateOffsetWithScaling(
+            stage1_fixations, aois,
+            search_range_x=(-20, 20),
+            search_range_y=(-30, 30),
+            scale_range=(0.90, 1.30),
+            offset_step=5,
+            scale_step=0.02,
+            tolerance=tolerance,
+            verbose=False
+        )
+
+        s2_scale_x = stage2_result['best_scale_x']
+        s2_scale_y = stage2_result['best_scale_y']
+        s2_offset_x = stage2_result['best_offset_x']
+        s2_offset_y = stage2_result['best_offset_y']
+
+        # 第2段階の補正を適用
+        stage2_fixations = applyScalingAndOffset(
+            stage1_fixations, s2_scale_x, s2_scale_y, s2_offset_x, s2_offset_y
+        )
+        stage2_rate_info = computeAllAOIRate(stage2_fixations, aois, tolerance=tolerance)
+        stage2_rate = stage2_rate_info['rate']
+
+        # 最終パラメータ
+        final_scale_x = s1_scale_x * s2_scale_x
+        final_scale_y = s1_scale_y * s2_scale_y
+        final_offset_x = s2_scale_x * s1_offset_x + s2_offset_x
+        final_offset_y = s2_scale_y * s1_offset_y + s2_offset_y
+
+        # --- 可視化 ---
+        fig, axes = plt.subplots(1, 3, figsize=(27, 9))
+
+        data_list = [
+            (fixations, 'Original', original_rate),
+            (stage1_fixations, 'Stage 1 (Click-Anchored)', stage1_rate),
+            (stage2_fixations, 'Stage 2 (AOI Optimized)', stage2_rate)
+        ]
+
+        for ax, (fix_data, title, rate) in zip(axes, data_list):
+            # 背景画像
+            if os.path.exists(image_path):
+                img = plt.imread(image_path)
+                ax.imshow(img)
+
+            # AOI領域を描画
+            for aoi in aois:
+                if aoi.get('is_multiline') and 'bboxes' in aoi:
+                    for bbox in aoi['bboxes']:
+                        if tolerance > 0:
+                            expanded_rect = patches.Rectangle(
+                                (bbox['x'] - tolerance, bbox['y'] - tolerance),
+                                bbox['width'] + 2 * tolerance,
+                                bbox['height'] + 2 * tolerance,
+                                linewidth=1, edgecolor='lightgreen', facecolor='lightgreen', alpha=0.2
+                            )
+                            ax.add_patch(expanded_rect)
+                        rect = patches.Rectangle(
+                            (bbox['x'], bbox['y']), bbox['width'], bbox['height'],
+                            linewidth=1, edgecolor='green', facecolor='none', alpha=0.5
+                        )
+                        ax.add_patch(rect)
+                else:
+                    bbox = aoi['bbox']
+                    if tolerance > 0:
+                        expanded_rect = patches.Rectangle(
+                            (bbox['x'] - tolerance, bbox['y'] - tolerance),
+                            bbox['width'] + 2 * tolerance,
+                            bbox['height'] + 2 * tolerance,
+                            linewidth=1, edgecolor='lightgreen', facecolor='lightgreen', alpha=0.2
+                        )
+                        ax.add_patch(expanded_rect)
+                    rect = patches.Rectangle(
+                        (bbox['x'], bbox['y']), bbox['width'], bbox['height'],
+                        linewidth=1, edgecolor='green', facecolor='none', alpha=0.5
+                    )
+                    ax.add_patch(rect)
+
+            # Fixationを描画
+            fx, fy = fix_data[:, 1], fix_data[:, 2]
+            ax.scatter(fx, fy, s=fixation_size, c='red', alpha=0.6, edgecolors='darkred', linewidths=0.5)
+
+            ax.set_xlim(0, 1920)
+            ax.set_ylim(1080, 0)
+            n_fix = len(fix_data)
+            n_in_aoi = int(rate * n_fix)
+            ax.set_title(f'{title}\nAOI Rate: {rate:.3f} ({n_in_aoi}/{n_fix})', fontsize=12)
+            ax.axis('off')
+
+        # 全体タイトル
+        s1_params = {"scale_x": s1_scale_x, "scale_y": s1_scale_y, "offset_x": s1_offset_x, "offset_y": s1_offset_y}
+        s2_params = {"scale_x": s2_scale_x, "scale_y": s2_scale_y, "offset_x": s2_offset_x, "offset_y": s2_offset_y}
+        final_params = {"scale_x": final_scale_x, "scale_y": final_scale_y, "offset_x": final_offset_x, "offset_y": final_offset_y}
+
+        plt.suptitle(
+            f"Segment: {segment_id} | Tolerance: {tolerance}px\n"
+            f"Stage1: scale=({s1_params['scale_x']:.3f}, {s1_params['scale_y']:.3f}), offset=({s1_params['offset_x']:.1f}, {s1_params['offset_y']:.1f})\n"
+            f"Stage2: scale=({s2_params['scale_x']:.3f}, {s2_params['scale_y']:.3f}), offset=({s2_params['offset_x']:.1f}, {s2_params['offset_y']:.1f})\n"
+            f"Final: scale=({final_params['scale_x']:.3f}, {final_params['scale_y']:.3f}), offset=({final_params['offset_x']:.1f}, {final_params['offset_y']:.1f})",
+            fontsize=11
+        )
+        plt.tight_layout()
+
+        # 保存
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+
+        return {"success": True, "segment_id": segment_id, "segment_index": segment_index, "error": None}
+
+    except Exception as e:
+        import traceback
+        return {"success": False, "segment_id": segment_id, "segment_index": segment_index, "error": f"{str(e)}\n{traceback.format_exc()}"}
+
+
+# =============================================================================
+# バッチ補正 並列処理
+# =============================================================================
+
+def _batch_correction_worker(task):
+    """
+    バッチ補正のワーカー関数（並列処理用）
+
+    Parameters:
+    -----------
+    task : dict
+        補正に必要なパラメータを含む辞書
+
+    Returns:
+    --------
+    dict
+        処理結果（成功/失敗情報を含む）
+    """
+    try:
+        result = runClickAnchoredCorrection(
+            eye_tracking_dir=task['eye_tracking_dir'],
+            event_log_path=task['event_log_path'],
+            coord_dir=task['coord_dir'],
+            phase=task['phase'],
+            output_dir=task['output_dir'],
+            tolerance=task['tolerance'],
+            prefer_scaling=task['prefer_scaling'],
+            max_offset=task['max_offset'],
+            verbose=False
+        )
+        return {
+            'success': True,
+            'group': task['group'],
+            'participant': task['participant'],
+            'phase': task['phase'],
+            'summary': result['summary'],
+            'segment_corrections': result['segment_corrections']
+        }
+    except Exception as e:
+        import traceback
+        return {
+            'success': False,
+            'group': task['group'],
+            'participant': task['participant'],
+            'phase': task['phase'],
+            'error': f"{str(e)}\n{traceback.format_exc()}"
+        }
+
+
+def runBatchCorrectionParallel(groups, phases, data_input, output_base,
+                                tolerance=5.0, prefer_scaling=True, max_offset=20.0,
+                                coord_participant='Test', n_workers=20):
+    """
+    全参加者・全フェーズに補正を適用（並列版）
+
+    Parameters:
+    -----------
+    groups : dict
+        グループ名 -> 参加者リストの辞書
+        例: {'A': ['P001', 'P002'], 'B': ['P003', 'P004']}
+    phases : list
+        処理するフェーズのリスト
+        例: ['pre', 'training1', 'training2', 'training3', 'post']
+    data_input : str
+        入力データのベースディレクトリ
+    output_base : str
+        出力ディレクトリのベースパス
+    tolerance : float
+        AOI境界からの許容距離（ピクセル）
+    prefer_scaling : bool
+        スケーリング重視モードを使用するか
+    max_offset : float
+        オフセットの最大絶対値（ピクセル）
+    coord_participant : str
+        座標ファイルを持つ参加者ID（通常はTest）
+    n_workers : int
+        並列ワーカー数
+
+    Returns:
+    --------
+    tuple (pd.DataFrame, pd.DataFrame)
+        (バッチサマリー, 全セグメント補正データ)
+    """
+    import pandas as pd
+    from glob import glob
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    # タスクリストを作成
+    tasks = []
+    for group, participants in groups.items():
+        for participant in participants:
+            for phase in phases:
+                participant_dir = os.path.join(data_input, group, participant, phase)
+                if not os.path.exists(participant_dir):
+                    continue
+
+                eye_tracking_dirs = sorted(glob(os.path.join(participant_dir, 'eye_tracking', '*')))
+                event_log_files = sorted(glob(os.path.join(participant_dir, 'logs', 'events_*.jsonl')))
+                coord_dir = os.path.join(data_input, group, coord_participant, phase, 'coordinates')
+
+                if not eye_tracking_dirs or not event_log_files or not os.path.exists(coord_dir):
+                    continue
+
+                tasks.append({
+                    'group': group,
+                    'participant': participant,
+                    'phase': phase,
+                    'eye_tracking_dir': eye_tracking_dirs[0],
+                    'event_log_path': event_log_files[0],
+                    'coord_dir': coord_dir,
+                    'output_dir': os.path.join(output_base, group, participant, phase),
+                    'tolerance': tolerance,
+                    'prefer_scaling': prefer_scaling,
+                    'max_offset': max_offset
+                })
+
+    print(f"Total tasks: {len(tasks)}, Workers: {n_workers}")
+
+    all_results = []
+    all_segment_corrections = []
+
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_batch_correction_worker, task): task for task in tasks}
+        for future in as_completed(futures):
+            result = future.result()
+            if result['success']:
+                summary = result['summary'].copy()
+                summary['group'] = result['group']
+                summary['participant'] = result['participant']
+                summary['phase'] = result['phase']
+                all_results.append(summary)
+
+                seg_corr = result['segment_corrections'].copy()
+                seg_corr['group'] = result['group']
+                seg_corr['participant'] = result['participant']
+                seg_corr['phase'] = result['phase']
+                all_segment_corrections.append(seg_corr)
+
+                print(f"  {result['group']}/{result['participant']}/{result['phase']}: "
+                      f"{summary['mean_original_rate']:.3f} -> {summary['mean_corrected_rate']:.3f} "
+                      f"({summary['mean_improvement']:+.3f})")
+            else:
+                print(f"  {result['group']}/{result['participant']}/{result['phase']}: Error - {result['error'][:100]}")
+
+    if all_segment_corrections:
+        all_corrections_df = pd.concat(all_segment_corrections, ignore_index=True)
+    else:
+        all_corrections_df = pd.DataFrame()
+
+    return pd.DataFrame(all_results), all_corrections_df
