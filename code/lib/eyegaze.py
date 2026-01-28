@@ -158,8 +158,8 @@ def isMinimumFixation(X, Y, mfx):
 def detectFixations(
         times, X, Y, P=None,
         min_concat_gaze_count=9,
-        min_fixation_size=50,
-        max_fixation_size=80):
+        min_fixation_size=20,
+        max_fixation_size=40):
     """
     視線データからfixation（注視点）を検出する
 
@@ -4001,6 +4001,7 @@ def _validate_segment_worker(task):
     seg_id = task['seg_id']
     data = task['data']
     coord_path = task['coord_path']
+    image_path = task.get('image_path')
     scale_x = task['scale_x']
     scale_y = task['scale_y']
     offset_x = task['offset_x']
@@ -4011,7 +4012,19 @@ def _validate_segment_worker(task):
     try:
         # 座標を読み込み
         coordinates = loadCoordinates(coord_path)
-        aois = extractAllAOIs(coordinates)
+
+        # 画像ファイル名からAOI抽出パラメータを取得
+        aoi_params = {}
+        if image_path:
+            parsed = parseImageFilename(image_path)
+            if parsed:
+                aoi_params = {
+                    'target_locale': parsed['target_locale'],
+                    'target_question': parsed['target_question'],
+                    'target_analog': parsed['target_analog'],
+                }
+
+        aois = extractAllAOIs(coordinates, **aoi_params)
 
         # Fixationを検出
         times = data[:, 0]
@@ -4235,6 +4248,7 @@ def runClickAnchoredCorrection(eye_tracking_dir, event_log_path, coord_dir, phas
             'seg_id': seg_id,
             'data': data,
             'coord_path': coord_path,
+            'image_path': seg.get('image_path'),
             'scale_x': scale_x,
             'scale_y': scale_y,
             'offset_x': offset_x,
@@ -4372,7 +4386,19 @@ def process_segment_worker(args):
         if not coord_path:
             return {"success": False, "segment_id": segment_id, "segment_index": segment_index, "error": "Coordinates not found"}
         coordinates = loadCoordinates(coord_path)
-        aois = extractAllAOIs(coordinates, levels=aoi_levels)
+
+        # 画像ファイル名からAOI抽出パラメータを取得
+        aoi_params = {}
+        if image_path:
+            parsed = parseImageFilename(image_path)
+            if parsed:
+                aoi_params = {
+                    'target_locale': parsed['target_locale'],
+                    'target_question': parsed['target_question'],
+                    'target_analog': parsed['target_analog'],
+                }
+
+        aois = extractAllAOIs(coordinates, levels=aoi_levels, **aoi_params)
 
         # Fixationを検出
         times, X, Y, P = data[:, 0], data[:, 1], data[:, 2], data[:, 3]
