@@ -3218,7 +3218,10 @@ def _validate_segment_worker(task):
         if len(times) < 10:
             return None
 
-        fixations = detectFixations(times, X, Y, P)
+        fixations = detectFixations(
+            times, X, Y, P,
+            min_concat_gaze_count=9, min_fixation_size=20, max_fixation_size=40,
+        )
         if len(fixations) == 0:
             return None
 
@@ -3584,7 +3587,10 @@ def process_segment_worker(args):
 
         # Fixationを検出
         times, X, Y, P = data[:, 0], data[:, 1], data[:, 2], data[:, 3]
-        fixations = detectFixations(times, X, Y, P)
+        fixations = detectFixations(
+            times, X, Y, P,
+            min_concat_gaze_count=9, min_fixation_size=20, max_fixation_size=40,
+        )
 
         if len(fixations) == 0:
             return {"success": False, "segment_id": segment_id, "segment_index": segment_index, "error": "No fixations"}
@@ -3721,6 +3727,106 @@ def process_segment_worker(args):
         return {"success": False, "segment_id": segment_id, "segment_index": segment_index, "error": f"{str(e)}\n{traceback.format_exc()}"}
 
 
+def _verifyAOIRateWorker(task):
+    """1つの参加者・フェーズについてAOI一致率を計算し、validation_results.jsonと比較する"""
+    import json
+
+    group_letter = task['group_letter']
+    participant_id = task['participant_id']
+    phase = task['phase']
+    input_root = task['input_root']
+    corrections_root = task['corrections_root']
+    tolerance = task.get('tolerance', 5.0)
+    coord_participant = task.get('coord_participant', 'Test')
+
+    label = f"{group_letter}/{participant_id}/{phase}"
+    comparisons = []
+
+    try:
+        base_dir = os.path.join(input_root, group_letter, participant_id, phase)
+        eye_tracking_base = os.path.join(base_dir, "eye_tracking")
+        log_dir = os.path.join(base_dir, "logs")
+        coord_dir = os.path.join(input_root, group_letter, coord_participant, phase, 'coordinates')
+
+        if not os.path.isdir(eye_tracking_base) or not os.path.isdir(log_dir):
+            return {'success': True, 'label': label, 'comparisons': []}
+        if not os.path.isdir(coord_dir):
+            return {'success': True, 'label': label, 'comparisons': []}
+
+        vr_path = os.path.join(corrections_root, group_letter, participant_id, phase, 'validation_results.json')
+        if not os.path.exists(vr_path):
+            return {'success': True, 'label': label, 'comparisons': []}
+        with open(vr_path, 'r') as f:
+            vr_data = json.load(f)
+        vr_by_idx = {v['segment_index']: v for v in vr_data['validation_results']}
+
+        timestamp_dirs = sorted([
+            d for d in os.listdir(eye_tracking_base)
+            if os.path.isdir(os.path.join(eye_tracking_base, d))
+        ])
+        eye_tracking_dir = os.path.join(eye_tracking_base, timestamp_dirs[-1])
+        event_files = sorted([f for f in os.listdir(log_dir) if f.endswith(".jsonl")])
+        event_log_path = os.path.join(log_dir, event_files[-1])
+
+        segments = readTobiiData(eye_tracking_dir, event_log_path, phase=phase)
+        coord_mapping = buildCoordinateMapping(coord_dir)
+
+        for i, seg in enumerate(segments):
+            seg_id = seg.get('analog_id') or seg.get('passage_id')
+            if i not in vr_by_idx:
+                continue
+            data = seg['data']
+            if data is None or len(data) == 0:
+                continue
+
+            event_type = seg.get('event_type', '')
+            prefix = _eventTypeToCoordPrefix(event_type)
+            coord_path = coord_mapping.get((prefix, seg_id))
+            if not coord_path and prefix in ('training_intro', 'analog_intro', 'training_complete'):
+                coord_path = coord_mapping.get((prefix, None))
+            if not coord_path:
+                continue
+
+            fixations = detectFixations(
+                data[:, 0], data[:, 1], data[:, 2], P=data[:, 3],
+                min_concat_gaze_count=9, min_fixation_size=20, max_fixation_size=40,
+            )
+            if len(fixations) == 0:
+                continue
+
+            coordinates = loadCoordinates(coord_path)
+            aoi_params = {}
+            image_path = seg.get('image_path', '')
+            if image_path:
+                parsed = parseImageFilename(image_path)
+                if parsed:
+                    aoi_params = {
+                        'target_locale': parsed['target_locale'],
+                        'target_question': parsed['target_question'],
+                        'target_analog': parsed['target_analog'],
+                    }
+            aois = extractAllAOIs(coordinates, **aoi_params)
+            rate_info = computeAllAOIRate(fixations, aois, tolerance=tolerance)
+
+            vr = vr_by_idx[i]
+            comparisons.append({
+                'group': group_letter,
+                'participant': participant_id,
+                'phase': phase,
+                'segment_id': seg_id,
+                'eb_original_rate': rate_info['rate'],
+                'eb_fixations': rate_info['total_fixations'],
+                'vr_original_rate': vr['original_rate'],
+                'vr_fixations': vr['n_fixations'],
+            })
+
+        return {'success': True, 'label': label, 'comparisons': comparisons}
+
+    except Exception:
+        import traceback
+        return {'success': False, 'label': label, 'comparisons': [], 'error': traceback.format_exc()}
+
+
 def _processOnePhaseWorker(task):
     """
     1参加者・1フェーズの全セグメント処理（並列実行用ワーカー）
@@ -3788,7 +3894,7 @@ def _processOnePhaseWorker(task):
         fixation_cache = {}  # segment_index -> fx (detectFixationsの結果をキャッシュ)
 
         for i, segment in enumerate(segments):
-            segment_index = i + 1
+            segment_index = i
             passage_id = segment["passage_id"]
             img_num = segment["image_number"]
             data = segment["data"]
@@ -3910,7 +4016,7 @@ def _processOnePhaseWorker(task):
         # --- 統計情報の出力（キャッシュ済みfixationを再利用） ---
         stats = []
         for i, segment in enumerate(segments):
-            segment_index = i + 1
+            segment_index = i
             fx = fixation_cache[segment_index]
 
             stat = {
