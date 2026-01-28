@@ -301,13 +301,23 @@ def plotHeatmap(
         plt.xlim(0, len(img[0]))
         plt.ylim(len(img), 0)
 
-    gx, gy = np.meshgrid(np.arange(0, len(img[0])), np.arange(0, len(img)))
-    values = np.zeros((len(img), len(img[0])))
+    sigma = 50
+    sigma_sq2 = 2.0 * sigma ** 2
+    radius = int(3 * sigma)  # 150px — これ以遠のガウス値は無視できる
+
+    h, w = len(img), len(img[0])
+    values = np.zeros((h, w))
     for i in range(len(X)):
-        pos = np.dstack([gx, gy])
-        rv = multivariate_normal([X[i], Y[i]], [[50**2, 0], [0, 50**2]])
-        values += rv.pdf(pos) * durations[i] / 2.0
-    values = values/np.max(values)
+        cx, cy = int(X[i]), int(Y[i])
+        x_min, x_max = max(0, cx - radius), min(w, cx + radius + 1)
+        y_min, y_max = max(0, cy - radius), min(h, cy + radius + 1)
+        if x_min >= x_max or y_min >= y_max:
+            continue
+        lx, ly = np.meshgrid(np.arange(x_min, x_max), np.arange(y_min, y_max))
+        g = np.exp(-((lx - X[i]) ** 2 + (ly - Y[i]) ** 2) / sigma_sq2)
+        values[y_min:y_max, x_min:x_max] += g * durations[i] / 2.0
+    if np.max(values) > 0:
+        values = values / np.max(values)
 
     masked = np.ma.masked_where(values < 0.05, values)
     cmap = cm.jet
@@ -322,51 +332,6 @@ def plotHeatmap(
 
     if data_save_path != "":
         np.savetxt(data_save_path, values, delimiter=",", fmt="%f")
-
-
-def plotGazeCorrectionComparison(original_data, corrected_data, bg_image="",
-                                  figsize=(24, 12), title=""):
-    """
-    補正前後の視線データを並べて比較表示する
-
-    Parameters:
-    -----------
-    original_data : np.array
-        補正前データ [[timestamp, gaze_x, gaze_y, pupil_diameter], ...]
-    corrected_data : np.array
-        補正後データ [[timestamp, gaze_x, gaze_y, pupil_diameter], ...]
-    bg_image : str
-        背景画像パス
-    figsize : tuple
-        図のサイズ
-    title : str
-        図のタイトル
-    """
-    fig, axes = plt.subplots(1, 2, figsize=figsize)
-
-    for ax, data, label in [(axes[0], original_data, "Original"),
-                            (axes[1], corrected_data, "Corrected")]:
-        if bg_image != "":
-            img = mpimg.imread(bg_image)
-            ax.imshow(img)
-            ax.set_xlim(0, len(img[0]))
-            ax.set_ylim(len(img), 0)
-
-        X = data[:, 1]
-        Y = data[:, 2]
-
-        ax.plot(X, Y, "-", c="blue", linewidth=0.5, alpha=0.5)
-        ax.scatter(X, Y, s=5, c="blue", alpha=0.3)
-        ax.scatter(X[0], Y[0], s=50, c="green", alpha=0.8, label="Start")
-        ax.scatter(X[-1], Y[-1], s=50, c="red", alpha=0.8, label="End")
-        ax.set_title(label)
-        ax.legend()
-
-    if title:
-        fig.suptitle(title, fontsize=14)
-
-    plt.tight_layout()
-    return fig
 
 
 def readEventLog(jsonl_path, event_type="question_screen_open"):
@@ -412,224 +377,6 @@ def readEventLog(jsonl_path, event_type="question_screen_open"):
     return events
 
 
-def correctGazeForHeadPosition(df,
-                               correction_factor_x=500.0,
-                               correction_factor_y=200.0,
-                               calibration_center_x=0.5,
-                               calibration_center_y=0.5):
-    """
-    頭部位置のずれに基づいて視線座標を補正する（trackbox座標版）
-
-    Parameters:
-    -----------
-    df : pandas.DataFrame
-        視線データ（gaze_x, gaze_y, trackbox座標、validityカラムを含む）
-    correction_factor_x : float
-        X軸補正係数（ピクセル/trackbox単位）。デフォルト: 500.0
-    correction_factor_y : float
-        Y軸補正係数（ピクセル/trackbox単位）。デフォルト: 200.0
-    calibration_center_x : float
-        キャリブレーション時の頭部X位置（trackbox座標）。デフォルト: 0.5
-    calibration_center_y : float
-        キャリブレーション時の頭部Y位置（trackbox座標）。デフォルト: 0.5
-
-    Returns:
-    --------
-    pandas.DataFrame
-        補正済み座標（corrected_gaze_x, corrected_gaze_y）を追加したDataFrame
-    """
-    df = df.copy()
-
-    # trackbox座標カラム名（pandasが重複カラムを自動リネーム）
-    left_trackbox_x_col = 'left_gaze_origin_in_trackbox_coordinate_system'
-    left_trackbox_y_col = 'left_gaze_origin_in_trackbox_coordinate_system.1'
-    right_trackbox_x_col = 'right_gaze_origin_in_trackbox_coordinate_system'
-    right_trackbox_y_col = 'right_gaze_origin_in_trackbox_coordinate_system.1'
-
-    # 両目の平均trackbox座標を計算
-    left_valid = df['left_gaze_origin_validity'] == 1
-    right_valid = df['right_gaze_origin_validity'] == 1
-    both_valid = left_valid & right_valid
-
-    # 頭部位置オフセットを計算
-    head_x = np.full(len(df), np.nan)
-    head_y = np.full(len(df), np.nan)
-
-    # 両目有効: 平均を使用
-    head_x[both_valid] = (df.loc[both_valid, left_trackbox_x_col].values +
-                          df.loc[both_valid, right_trackbox_x_col].values) / 2
-    head_y[both_valid] = (df.loc[both_valid, left_trackbox_y_col].values +
-                          df.loc[both_valid, right_trackbox_y_col].values) / 2
-
-    # 左目のみ有効
-    left_only = left_valid & ~right_valid
-    head_x[left_only] = df.loc[left_only, left_trackbox_x_col].values
-    head_y[left_only] = df.loc[left_only, left_trackbox_y_col].values
-
-    # 右目のみ有効
-    right_only = right_valid & ~left_valid
-    head_x[right_only] = df.loc[right_only, right_trackbox_x_col].values
-    head_y[right_only] = df.loc[right_only, right_trackbox_y_col].values
-
-    # オフセット計算（キャリブレーション中央からのずれ）
-    head_offset_x = head_x - calibration_center_x
-    head_offset_y = head_y - calibration_center_y
-
-    # 補正適用
-    # X軸: trackbox_x > 0.5（右寄り）= 頭が左 = UCS X負 → 逆の関係なので「-」で補正
-    # Y軸: trackbox_y > 0.5（下寄り）= 頭が下 = UCS Y負 → 逆の関係だが画面Yも逆なので「+」で補正
-    df['head_offset_x'] = head_offset_x
-    df['head_offset_y'] = head_offset_y
-    df['corrected_gaze_x'] = df['gaze_x'] - correction_factor_x * head_offset_x
-    df['corrected_gaze_y'] = df['gaze_y'] + correction_factor_y * head_offset_y  # Y軸は+
-
-    # NaN（無効データ）の場合は元の値を使用
-    nan_mask = np.isnan(head_offset_x)
-    df.loc[nan_mask, 'corrected_gaze_x'] = df.loc[nan_mask, 'gaze_x']
-    df.loc[nan_mask, 'corrected_gaze_y'] = df.loc[nan_mask, 'gaze_y']
-
-    return df
-
-
-def correctGazeGeometric(df,
-                         calibration_head_x=0.0,
-                         calibration_head_y=0.0,
-                         use_average_reference=False,
-                         correct_y=False,
-                         screen_width_mm=509.2,
-                         screen_height_mm=286.4,
-                         screen_width_px=1920,
-                         screen_height_px=1080):
-    """
-    mm単位の頭部位置を使った幾何学的視差補正
-
-    頭部位置（mm）と画面からの距離を考慮して、各サンプルごとに
-    視差による視線ずれを補正します。
-
-    Parameters:
-    -----------
-    df : pandas.DataFrame
-        視線データ（全カラム含む）
-    calibration_head_x : float
-        キャリブレーション時の頭部X位置（mm）。デフォルト: 0.0（画面中央）
-    calibration_head_y : float
-        キャリブレーション時の頭部Y位置（mm）。デフォルト: 0.0
-    use_average_reference : bool
-        Trueの場合、calibration_head_x/yを無視してデータの平均頭部位置を基準にする。
-        デフォルト: False
-    correct_y : bool
-        Y軸も補正するか。デフォルト: False（X軸のみ補正）
-    screen_width_mm : float
-        画面の物理幅（mm）。デフォルト: 509.0（23インチモニタ相当）
-    screen_height_mm : float
-        画面の物理高さ（mm）。デフォルト: 287.0
-    screen_width_px : int
-        画面の横解像度。デフォルト: 1920
-    screen_height_px : int
-        画面の縦解像度。デフォルト: 1080
-
-    Returns:
-    --------
-    pandas.DataFrame
-        補正済み座標（corrected_gaze_x, corrected_gaze_y）を追加したDataFrame
-    """
-    df = df.copy()
-
-    # mm単位カラム名（pandasが重複カラムを自動リネーム）
-    # left_gaze_origin_in_user_coordinate_system: x, .1: y, .2: z
-    left_origin_x_col = 'left_gaze_origin_in_user_coordinate_system'
-    left_origin_y_col = 'left_gaze_origin_in_user_coordinate_system.1'
-    left_origin_z_col = 'left_gaze_origin_in_user_coordinate_system.2'
-    right_origin_x_col = 'right_gaze_origin_in_user_coordinate_system'
-    right_origin_y_col = 'right_gaze_origin_in_user_coordinate_system.1'
-    right_origin_z_col = 'right_gaze_origin_in_user_coordinate_system.2'
-
-    left_valid = df['left_gaze_origin_validity'] == 1
-    right_valid = df['right_gaze_origin_validity'] == 1
-    both_valid = left_valid & right_valid
-
-    # 頭部位置（mm）を取得
-    head_x_mm = np.full(len(df), np.nan)
-    head_y_mm = np.full(len(df), np.nan)
-    head_z_mm = np.full(len(df), np.nan)
-
-    # 両目有効: 平均を使用
-    head_x_mm[both_valid] = (df.loc[both_valid, left_origin_x_col].values +
-                             df.loc[both_valid, right_origin_x_col].values) / 2
-    head_y_mm[both_valid] = (df.loc[both_valid, left_origin_y_col].values +
-                             df.loc[both_valid, right_origin_y_col].values) / 2
-    head_z_mm[both_valid] = (df.loc[both_valid, left_origin_z_col].values +
-                             df.loc[both_valid, right_origin_z_col].values) / 2
-
-    # 左目のみ有効
-    left_only = left_valid & ~right_valid
-    head_x_mm[left_only] = df.loc[left_only, left_origin_x_col].values
-    head_y_mm[left_only] = df.loc[left_only, left_origin_y_col].values
-    head_z_mm[left_only] = df.loc[left_only, left_origin_z_col].values
-
-    # 右目のみ有効
-    right_only = right_valid & ~left_valid
-    head_x_mm[right_only] = df.loc[right_only, right_origin_x_col].values
-    head_y_mm[right_only] = df.loc[right_only, right_origin_y_col].values
-    head_z_mm[right_only] = df.loc[right_only, right_origin_z_col].values
-
-    # 基準位置の決定
-    if use_average_reference:
-        # データの平均頭部位置を基準にする（変動分のみ補正）
-        ref_x = np.nanmean(head_x_mm)
-        ref_y = np.nanmean(head_y_mm)
-    else:
-        ref_x = calibration_head_x
-        ref_y = calibration_head_y
-
-    # 頭部移動量（mm）
-    delta_x_mm = head_x_mm - ref_x
-    delta_y_mm = head_y_mm - ref_y
-
-    # ピクセル/mm変換係数
-    px_per_mm_x = screen_width_px / screen_width_mm
-    px_per_mm_y = screen_height_px / screen_height_mm
-
-    # 幾何学的視差補正
-    # 頭が左に移動（delta_x < 0）すると、視線は右にずれて見える
-    # 補正: 視線を左に移動させる = gaze_x を減らす
-    # 視差量は head_z（距離）に反比例する
-    # 基準距離を550mmとして、それより近いと補正量が増え、遠いと減る
-    reference_z = 550.0  # キャリブレーション時の基準距離（mm）
-
-    # 距離比率（近いほど大きい補正）
-    z_ratio = reference_z / np.where(head_z_mm > 0, head_z_mm, reference_z)
-
-    # 補正量（ピクセル）
-    # 頭が右（delta_x > 0）→ Tobiiの計算した視線は実際より左にずれる → 補正で右に戻す
-    # 頭が左（delta_x < 0）→ Tobiiの計算した視線は実際より右にずれる → 補正で左に戻す
-    # X軸: Tobiiと画面は同じ方向（右が正）なので、delta_xと同じ方向に補正
-    correction_x_px = delta_x_mm * px_per_mm_x * z_ratio
-
-    # 補正適用
-    df['head_x_mm'] = head_x_mm
-    df['head_y_mm'] = head_y_mm
-    df['head_z_mm'] = head_z_mm
-    df['correction_x_px'] = correction_x_px
-    df['corrected_gaze_x'] = df['gaze_x'] + correction_x_px  # delta_xと同じ方向
-
-    # Y軸補正（オプション）
-    if correct_y:
-        correction_y_px = delta_y_mm * px_per_mm_y * z_ratio
-        df['correction_y_px'] = correction_y_px
-        # Y軸は座標系が反転（Tobii: 上が正、画面: 下が正）なので逆方向に補正
-        df['corrected_gaze_y'] = df['gaze_y'] - correction_y_px  # delta_yと逆方向
-    else:
-        df['corrected_gaze_y'] = df['gaze_y']  # Y補正なし
-
-    # NaN（無効データ）の場合は元の値を使用
-    nan_mask = np.isnan(head_x_mm)
-    df.loc[nan_mask, 'corrected_gaze_x'] = df.loc[nan_mask, 'gaze_x']
-    df.loc[nan_mask, 'corrected_gaze_y'] = df.loc[nan_mask, 'gaze_y']
-
-    return df
-
-
 def passageIdToImageNumber(passage_id):
     """
     passage_id (例: "pre_01") を画像番号 (例: "003") に変換
@@ -663,23 +410,7 @@ def passageIdToImageNumber(passage_id):
 # 統合データ読み込み関数
 # =============================================================================
 
-def segmentGazeDataUnified(gaze_csv_path, events, end_timestamp, phase_config,
-                           apply_head_correction=False,
-                           correction_method="geometric",
-                           # geometric方式用
-                           use_average_reference=False,
-                           correct_y=False,
-                           calibration_head_x=0.0,
-                           calibration_head_y=0.0,
-                           screen_width_mm=509.2,
-                           screen_height_mm=286.4,
-                           screen_width_px=1920,
-                           screen_height_px=1080,
-                           # trackbox方式用
-                           correction_factor_x=500.0,
-                           correction_factor_y=200.0,
-                           calibration_center_x=0.5,
-                           calibration_center_y=0.5):
+def segmentGazeDataUnified(gaze_csv_path, events, end_timestamp, phase_config):
     """
     統合セグメント化関数（全フェーズ対応）
 
@@ -701,39 +432,14 @@ def segmentGazeDataUnified(gaze_csv_path, events, end_timestamp, phase_config,
     """
     import pandas as pd
 
-    # 読み込むカラムを決定
     base_cols = ['#timestamp', 'gaze_x', 'gaze_y', 'pupil_diameter']
-    if apply_head_correction:
-        df = pd.read_csv(gaze_csv_path)
-    else:
-        df = pd.read_csv(gaze_csv_path, usecols=base_cols)
+    df = pd.read_csv(gaze_csv_path, usecols=base_cols)
 
     df = df.dropna(subset=['gaze_x', 'gaze_y', 'pupil_diameter'])
     df['timestamp_sec'] = df['#timestamp'] * 0.001 + 32400
 
-    # 頭部位置補正
-    if apply_head_correction:
-        if correction_method == "geometric":
-            df = correctGazeGeometric(df,
-                                      calibration_head_x=calibration_head_x,
-                                      calibration_head_y=calibration_head_y,
-                                      use_average_reference=use_average_reference,
-                                      correct_y=correct_y,
-                                      screen_width_mm=screen_width_mm,
-                                      screen_height_mm=screen_height_mm,
-                                      screen_width_px=screen_width_px,
-                                      screen_height_px=screen_height_px)
-        else:
-            df = correctGazeForHeadPosition(df,
-                                            correction_factor_x=correction_factor_x,
-                                            correction_factor_y=correction_factor_y,
-                                            calibration_center_x=calibration_center_x,
-                                            calibration_center_y=calibration_center_y)
-        gaze_x_col = 'corrected_gaze_x'
-        gaze_y_col = 'corrected_gaze_y'
-    else:
-        gaze_x_col = 'gaze_x'
-        gaze_y_col = 'gaze_y'
+    gaze_x_col = 'gaze_x'
+    gaze_y_col = 'gaze_y'
 
     segments = []
 
@@ -795,23 +501,7 @@ def segmentGazeDataUnified(gaze_csv_path, events, end_timestamp, phase_config,
     return segments
 
 
-def readTobiiData(eye_tracking_dir, event_log_path, phase="pre",
-                  apply_head_correction=False,
-                  correction_method=None,
-                  # geometric方式用
-                  use_average_reference=False,
-                  correct_y=False,
-                  calibration_head_x=0.0,
-                  calibration_head_y=0.0,
-                  screen_width_mm=509.2,
-                  screen_height_mm=286.4,
-                  screen_width_px=1920,
-                  screen_height_px=1080,
-                  # trackbox方式用
-                  correction_factor_x=500.0,
-                  correction_factor_y=200.0,
-                  calibration_center_x=0.5,
-                  calibration_center_y=0.5):
+def readTobiiData(eye_tracking_dir, event_log_path, phase="pre"):
     """
     統合データ読み込み関数（全フェーズ対応）
 
@@ -823,10 +513,6 @@ def readTobiiData(eye_tracking_dir, event_log_path, phase="pre",
         events.jsonlのパス
     phase : str
         フェーズ名（"pre", "training1", "training2", "posttest"）
-    apply_head_correction : bool
-        頭部位置補正を適用するか
-    correction_method : str or None
-        補正方式。Noneの場合はフェーズのデフォルトを使用
 
     Returns:
     --------
@@ -839,10 +525,6 @@ def readTobiiData(eye_tracking_dir, event_log_path, phase="pre",
     if phase not in PHASE_CONFIGS:
         raise ValueError(f"Unknown phase '{phase}'. Available: {list(PHASE_CONFIGS.keys())}")
     phase_config = PHASE_CONFIGS[phase]
-
-    # 補正方式のデフォルト
-    if correction_method is None:
-        correction_method = "trackbox" if phase.startswith("training") else "geometric"
 
     # イベント読み込み
     # "phase_end" は仮想マーカーなので実際のイベントタイプから除外
@@ -865,21 +547,7 @@ def readTobiiData(eye_tracking_dir, event_log_path, phase="pre",
     # セグメント化
     gaze_csv = os.path.join(eye_tracking_dir, "tobii_pro_gaze.csv")
     segments = segmentGazeDataUnified(
-        gaze_csv, events, end_timestamp, phase_config,
-        apply_head_correction=apply_head_correction,
-        correction_method=correction_method,
-        use_average_reference=use_average_reference,
-        correct_y=correct_y,
-        calibration_head_x=calibration_head_x,
-        calibration_head_y=calibration_head_y,
-        screen_width_mm=screen_width_mm,
-        screen_height_mm=screen_height_mm,
-        screen_width_px=screen_width_px,
-        screen_height_px=screen_height_px,
-        correction_factor_x=correction_factor_x,
-        correction_factor_y=correction_factor_y,
-        calibration_center_x=calibration_center_x,
-        calibration_center_y=calibration_center_y
+        gaze_csv, events, end_timestamp, phase_config
     )
 
     # 背景画像パスを追加
@@ -1046,366 +714,6 @@ def buildCoordinateMapping(coord_dir):
     return mapping
 
 
-def extractAOIs(coordinates, levels=None):
-    """
-    座標データからAOI (Area of Interest) を抽出
-
-    Parameters:
-    -----------
-    coordinates : dict
-        loadCoordinates()で読み込んだ座標データ
-    levels : list of str, optional
-        抽出するレベル。デフォルト: ["paragraph", "sentence", "word", "choice"]
-        - "paragraph": 段落レベル
-        - "sentence": 文レベル
-        - "word": 単語レベル
-        - "choice": 選択肢レベル
-        - "question": 問題文レベル
-
-    Returns:
-    --------
-    list of dict
-        AOIリスト。各要素:
-        {
-            "id": "para_0_sent_1",
-            "level": "sentence",
-            "text": "Could you please...",
-            "bbox": {"x": 295, "y": 113, "width": 348, "height": 19},
-            "parent_ids": {"paragraph": "para_0"}
-        }
-    """
-    if levels is None:
-        levels = ["paragraph", "sentence", "word", "choice"]
-
-    aois = []
-    coords = coordinates.get('coordinates', coordinates)
-
-    # 左パネル（本文）の処理
-    left_panel = coords.get('left_panel', {})
-    passages = left_panel.get('passages', [])
-
-    # trainingのような言語別座標の場合、日本語版を優先
-    if not passages:
-        passages = left_panel.get('passages_ja', left_panel.get('passages_en', []))
-
-    for passage in passages:
-        for para in passage.get('paragraphs', []):
-            para_idx = para.get('paragraph_index', 0)
-            para_id = f"para_{para_idx}"
-
-            # 段落レベル
-            if "paragraph" in levels:
-                # 段落のbboxは全ての行を包含する領域
-                para_lines = para.get('lines', [])
-                if para_lines:
-                    bboxes, encompassing_bbox, is_multiline = _lines_to_bboxes(para_lines)
-                    aois.append({
-                        "id": para_id,
-                        "level": "paragraph",
-                        "text": para.get('text', '')[:50] + ('...' if len(para.get('text', '')) > 50 else ''),
-                        "full_text": para.get('text', ''),
-                        "bbox": encompassing_bbox,
-                        "bboxes": bboxes,
-                        "is_multiline": is_multiline,
-                        "parent_ids": {}
-                    })
-
-            for sent in para.get('sentences', []):
-                sent_idx = sent.get('sentence_index', 0)
-                sent_id = f"{para_id}_sent_{sent_idx}"
-
-                # 文レベル
-                if "sentence" in levels:
-                    sent_lines = sent.get('lines', [])
-                    if sent_lines:
-                        bboxes, encompassing_bbox, is_multiline = _lines_to_bboxes(sent_lines)
-                        aois.append({
-                            "id": sent_id,
-                            "level": "sentence",
-                            "text": sent.get('text', ''),
-                            "bbox": encompassing_bbox,
-                            "bboxes": bboxes,
-                            "is_multiline": is_multiline,
-                            "parent_ids": {"paragraph": para_id}
-                        })
-
-                # 単語レベル
-                if "word" in levels:
-                    for word in sent.get('words', []):
-                        word_idx = word.get('word_index', 0)
-                        word_id = f"{sent_id}_word_{word_idx}"
-                        bbox = word.get('bbox', {})
-                        aois.append({
-                            "id": word_id,
-                            "level": "word",
-                            "text": word.get('text', ''),
-                            "bbox": bbox,
-                            "parent_ids": {"paragraph": para_id, "sentence": sent_id}
-                        })
-
-    # 右パネル（問題・選択肢）の処理
-    right_panel = coords.get('right_panel', {})
-    questions = right_panel.get('questions', [])
-
-    for q in questions:
-        q_idx = q.get('question_index', 0)
-        q_id = f"question_{q_idx}"
-
-        # 問題文レベル
-        if "question" in levels:
-            q_text = q.get('question_text', {})
-            q_lines = q_text.get('lines', [])
-            if q_lines:
-                bboxes, encompassing_bbox, is_multiline = _lines_to_bboxes(q_lines)
-                aois.append({
-                    "id": q_id,
-                    "level": "question",
-                    "text": q_text.get('text', ''),
-                    "bbox": encompassing_bbox,
-                    "bboxes": bboxes,
-                    "is_multiline": is_multiline,
-                    "parent_ids": {}
-                })
-
-        # 選択肢レベル
-        if "choice" in levels:
-            for choice in q.get('choices', []):
-                choice_id = f"{q_id}_choice_{choice.get('choice_id', '')}"
-                choice_bbox = choice.get('choice_bbox', {})
-                choice_text = choice.get('choice_text', {})
-                aois.append({
-                    "id": choice_id,
-                    "level": "choice",
-                    "text": choice_text.get('text', ''),
-                    "bbox": choice_bbox,
-                    "parent_ids": {"question": q_id}
-                })
-
-    return aois
-
-
-def matchFixationsToAOIs(fixations, aois):
-    """
-    全fixationに対してAOIをマッチング（NumPyベクトル化版）
-
-    Parameters:
-    -----------
-    fixations : np.array or pd.DataFrame
-        fixationデータ。カラム: [timestamp, x, y, duration, ...]
-    aois : list of dict
-        extractAOIs()で抽出したAOIリスト
-
-    Returns:
-    --------
-    list of dict
-        各fixationにAOI情報を付加したリスト
-    """
-    import pandas as pd
-
-    # DataFrameに変換
-    if isinstance(fixations, np.ndarray):
-        df = pd.DataFrame(fixations, columns=[
-            'timestamp', 'x', 'y', 'duration',
-            'saccade_length', 'saccade_angle', 'saccade_speed', 'pupil_diameter'
-        ])
-    else:
-        df = fixations.copy()
-
-    n_fixations = len(df)
-    if n_fixations == 0:
-        return []
-
-    # Fixation座標を抽出
-    fx = df['x'].values
-    fy = df['y'].values
-
-    # レベルごとにAOIをグループ化し、bbox配列を作成
-    levels = ['word', 'sentence', 'paragraph', 'choice', 'question']
-    level_data = {}
-
-    for level in levels:
-        level_aois = [a for a in aois if a.get('level') == level]
-        if not level_aois:
-            level_data[level] = {'bbox_arr': None, 'aoi_list': [], 'areas': []}
-            continue
-
-        # 各AOIのbboxを展開（multilineは複数bbox）
-        bbox_list = []
-        aoi_indices = []  # どのAOIに属するか
-        areas = []
-
-        for i, aoi in enumerate(level_aois):
-            if aoi.get('is_multiline') and 'bboxes' in aoi:
-                total_area = 0
-                for bbox in aoi['bboxes']:
-                    bbox_list.append([bbox['x'], bbox['y'],
-                                     bbox['x'] + bbox['width'],
-                                     bbox['y'] + bbox['height']])
-                    aoi_indices.append(i)
-                    total_area += bbox['width'] * bbox['height']
-                areas.append(total_area)
-            elif 'bbox' in aoi:
-                bbox = aoi['bbox']
-                bbox_list.append([bbox['x'], bbox['y'],
-                                 bbox['x'] + bbox['width'],
-                                 bbox['y'] + bbox['height']])
-                aoi_indices.append(i)
-                areas.append(bbox['width'] * bbox['height'])
-
-        if bbox_list:
-            level_data[level] = {
-                'bbox_arr': np.array(bbox_list),  # (M, 4)
-                'aoi_indices': np.array(aoi_indices),
-                'aoi_list': level_aois,
-                'areas': np.array(areas)
-            }
-        else:
-            level_data[level] = {'bbox_arr': None, 'aoi_list': [], 'areas': []}
-
-    # 各レベルでマッチングを実行
-    matched = {level: [None] * n_fixations for level in levels}
-
-    for level in levels:
-        data = level_data[level]
-        if data['bbox_arr'] is None:
-            continue
-
-        bbox_arr = data['bbox_arr']
-        aoi_indices = data['aoi_indices']
-        aoi_list = data['aoi_list']
-        areas = data['areas']
-
-        # ブロードキャストで全判定: (N, M)
-        in_x = (fx[:, None] >= bbox_arr[:, 0]) & (fx[:, None] <= bbox_arr[:, 2])
-        in_y = (fy[:, None] >= bbox_arr[:, 1]) & (fy[:, None] <= bbox_arr[:, 3])
-        in_bbox = in_x & in_y  # (N, M)
-
-        # 各fixationについてマッチしたAOIを見つける
-        for i in range(n_fixations):
-            matching_bbox_indices = np.where(in_bbox[i])[0]
-            if len(matching_bbox_indices) == 0:
-                continue
-
-            # マッチしたAOIのインデックスを取得
-            matching_aoi_indices = aoi_indices[matching_bbox_indices]
-            unique_aoi_indices = np.unique(matching_aoi_indices)
-
-            # 最小面積のAOIを選択
-            min_area = float('inf')
-            best_aoi = None
-            for aoi_idx in unique_aoi_indices:
-                if areas[aoi_idx] < min_area:
-                    min_area = areas[aoi_idx]
-                    best_aoi = aoi_list[aoi_idx]
-
-            matched[level][i] = best_aoi
-
-    # 結果を構築
-    results = []
-    timestamps = df['timestamp'].values
-    durations = df['duration'].values
-    pupil_diameters = df['pupil_diameter'].values if 'pupil_diameter' in df.columns else [np.nan] * n_fixations
-
-    for i in range(n_fixations):
-        word_aoi = matched['word'][i]
-        sent_aoi = matched['sentence'][i]
-        para_aoi = matched['paragraph'][i]
-        choice_aoi = matched['choice'][i]
-        question_aoi = matched['question'][i]
-
-        result = {
-            'timestamp': timestamps[i],
-            'x': fx[i],
-            'y': fy[i],
-            'duration': durations[i],
-            'pupil_diameter': pupil_diameters[i] if i < len(pupil_diameters) else np.nan,
-            'word_id': word_aoi['id'] if word_aoi else None,
-            'word_text': word_aoi.get('text') if word_aoi else None,
-            'sentence_id': sent_aoi['id'] if sent_aoi else None,
-            'sentence_text': sent_aoi.get('text') if sent_aoi else None,
-            'paragraph_id': para_aoi['id'] if para_aoi else None,
-            'choice_id': choice_aoi['id'] if choice_aoi else None,
-            'choice_text': choice_aoi.get('text') if choice_aoi else None,
-            'question_id': question_aoi['id'] if question_aoi else None,
-        }
-        results.append(result)
-
-    return results
-
-
-def computeAOIStatistics(matched_fixations, level="sentence"):
-    """
-    各AOIの注視統計を計算（最適化版）
-
-    Parameters:
-    -----------
-    matched_fixations : list of dict
-        matchFixationsToAOIs()の戻り値
-    level : str
-        集計するレベル（"word", "sentence", "paragraph", "choice"）
-
-    Returns:
-    --------
-    pd.DataFrame
-        各AOIの統計:
-        - aoi_id: AOIのID
-        - total_duration: 総注視時間
-        - fixation_count: 注視回数
-        - first_fixation_time: 最初の注視時刻
-        - mean_duration: 平均注視時間
-        - revisits: 再訪問回数
-    """
-    import pandas as pd
-    from collections import defaultdict
-
-    id_key = f"{level}_id"
-    text_key = f"{level}_text" if level != "paragraph" else None
-
-    # AOIごとにfixationを集計（インデックスも保存）
-    aoi_data = defaultdict(list)
-
-    for idx, fix in enumerate(matched_fixations):
-        aoi_id = fix.get(id_key)
-        if aoi_id is not None:
-            # インデックスを含めて保存
-            aoi_data[aoi_id].append((idx, fix))
-
-    # 統計計算
-    stats = []
-    for aoi_id, indexed_fixations in aoi_data.items():
-        # インデックス順にソート
-        indexed_fixations.sort(key=lambda x: x[0])
-
-        durations = [f['duration'] for _, f in indexed_fixations]
-        timestamps = [f['timestamp'] for _, f in indexed_fixations]
-        indices = [idx for idx, _ in indexed_fixations]
-
-        # 再訪問回数（連続しないfixationのグループ数 - 1）
-        revisits = 0
-        prev_idx = -2
-        for idx in indices:
-            if idx != prev_idx + 1:
-                revisits += 1
-            prev_idx = idx
-        revisits = max(0, revisits - 1)
-
-        text = indexed_fixations[0][1].get(text_key, '') if text_key else ''
-
-        stats.append({
-            'aoi_id': aoi_id,
-            'level': level,
-            'text': text[:50] + ('...' if len(text) > 50 else '') if text else '',
-            'total_duration': sum(durations),
-            'fixation_count': len(indexed_fixations),
-            'mean_duration': np.mean(durations),
-            'first_fixation_time': min(timestamps),
-            'revisits': revisits
-        })
-
-    return pd.DataFrame(stats).sort_values('first_fixation_time') if stats else pd.DataFrame()
-
-
-# =============================================================================
 def readEventLogMultiple(jsonl_path, event_types):
     """
     JSONLイベントログから複数のイベントタイプを抽出
@@ -1456,95 +764,6 @@ def readEventLogMultiple(jsonl_path, event_types):
     events.sort(key=lambda x: x['timestamp'])
     return events
 
-
-def plotAOIWithGaze(image_path, aois, fixations, level="sentence",
-                    save_path=None, figsize=(16, 9)):
-    """
-    背景画像にAOI領域とfixationを重ねて可視化
-
-    Parameters:
-    -----------
-    image_path : str
-        背景画像のパス
-    aois : list of dict
-        extractAOIs()で抽出したAOIリスト
-    fixations : np.array or pd.DataFrame
-        fixationデータ
-    level : str
-        表示するAOIレベル（"word", "sentence", "paragraph", "choice"）
-    save_path : str, optional
-        保存先パス
-    figsize : tuple
-        図のサイズ
-    """
-    import os
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as patches
-
-    _, ax = plt.subplots(figsize=figsize)
-
-    # 背景画像
-    if image_path and os.path.exists(image_path):
-        img = plt.imread(image_path)
-        ax.imshow(img)
-
-    # AOI領域を描画
-    colors = {
-        'word': 'blue',
-        'sentence': 'green',
-        'paragraph': 'orange',
-        'choice': 'purple',
-        'question': 'red'
-    }
-
-    for aoi in aois:
-        if aoi['level'] != level:
-            continue
-
-        color = colors.get(level, 'gray')
-
-        # multiline AOIの場合は各行を個別に描画
-        if aoi.get('is_multiline') and 'bboxes' in aoi:
-            for bbox in aoi['bboxes']:
-                rect = patches.Rectangle(
-                    (bbox['x'], bbox['y']), bbox['width'], bbox['height'],
-                    linewidth=1, edgecolor=color,
-                    facecolor='none', alpha=0.7
-                )
-                ax.add_patch(rect)
-        else:
-            bbox = aoi['bbox']
-            rect = patches.Rectangle(
-                (bbox['x'], bbox['y']), bbox['width'], bbox['height'],
-                linewidth=1, edgecolor=color,
-                facecolor='none', alpha=0.7
-            )
-            ax.add_patch(rect)
-
-    # fixationを描画
-    if isinstance(fixations, np.ndarray):
-        fx, fy, fdur = fixations[:, 1], fixations[:, 2], fixations[:, 3]
-    else:
-        fx, fy, fdur = fixations['x'], fixations['y'], fixations['duration']
-
-    # 注視時間に応じたサイズ
-    sizes = np.array(fdur) * 500
-
-    ax.scatter(fx, fy, s=sizes, c='red', alpha=0.5, edgecolors='darkred')
-
-    ax.set_xlim(0, 1920)
-    ax.set_ylim(1080, 0)  # Y軸反転
-    ax.set_title(f'AOI ({level}) with Fixations')
-    ax.axis('off')
-
-    plt.tight_layout()
-
-    if save_path:
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close()
-    else:
-        plt.show()
 
 
 # =============================================================================
@@ -2975,6 +2194,43 @@ def applyScalingAndOffset(fixations, scale_x=1.0, scale_y=1.0,
     return corrected
 
 
+def recalculateSaccadeMetrics(fixations):
+    """
+    固視配列のサッカード指標（length, angle, speed）を座標から再計算する。
+    座標補正後に呼び出すことを想定。
+
+    Parameters:
+    -----------
+    fixations : np.ndarray
+        Fixationデータ (N, 8)
+        columns: timestamp, x, y, duration, saccade_length, saccade_angle, saccade_speed, pupil_diameter
+
+    Returns:
+    --------
+    np.ndarray
+        サッカード指標を再計算したFixationデータ
+    """
+    result = fixations.copy()
+    # 最初の固視: サッカード指標は0
+    result[0, 4] = 0.0
+    result[0, 5] = 0.0
+    result[0, 6] = 0.0
+
+    for i in range(1, len(result)):
+        delta_x = result[i, 1] - result[i - 1, 1]
+        delta_y = result[i, 2] - result[i - 1, 2]
+        saccade_length = math.sqrt(delta_x * delta_x + delta_y * delta_y)
+        saccade_angle = math.degrees(math.atan2(delta_y, delta_x))
+        delta_t = result[i, 0] - (result[i - 1, 0] + result[i - 1, 3])
+        saccade_speed = saccade_length / delta_t if delta_t > 0 else 0.0
+
+        result[i, 4] = saccade_length
+        result[i, 5] = saccade_angle
+        result[i, 6] = saccade_speed
+
+    return result
+
+
 def estimateOffsetWithScaling(fixations, aois,
                                search_range_x=(-30, 30),
                                search_range_y=(-50, 50),
@@ -3910,79 +3166,6 @@ def estimateSegmentCorrections(reference_points, segments, center_x=960, center_
     return corrections_df
 
 
-def applyCorrectionToSegment(gaze_data, offset_x, offset_y):
-    """
-    セグメントの視線データに補正を適用
-
-    Parameters:
-    -----------
-    gaze_data : np.ndarray
-        視線データ。形状は(N, 4)以上。[:, 1]がX座標、[:, 2]がY座標
-    offset_x : float
-        X方向のオフセット（ピクセル）
-    offset_y : float
-        Y方向のオフセット（ピクセル）
-
-    Returns:
-    --------
-    np.ndarray
-        補正後の視線データ
-    """
-    corrected = gaze_data.copy()
-    corrected[:, 1] = gaze_data[:, 1] + offset_x
-    corrected[:, 2] = gaze_data[:, 2] + offset_y
-    return corrected
-
-
-def validateSegmentCorrection(fixations, aois, original_rate=None, tolerance=0.0):
-    """
-    AOIマッチ率で補正効果を検証
-
-    Parameters:
-    -----------
-    fixations : np.ndarray
-        Fixationデータ (N, 8)。[:, 1]がX座標、[:, 2]がY座標
-    aois : list of dict
-        AOIリスト
-    original_rate : float, optional
-        補正前のAOI内率。指定するとimprovementを計算
-    tolerance : float
-        AOI境界からの許容距離（ピクセル）。デフォルト0.0（厳密判定）
-
-    Returns:
-    --------
-    dict
-        {
-            'aoi_rate': float,       # 補正後のAOI内率
-            'improvement': float,    # 補正前との差（original_rate指定時のみ）
-            'n_fixations': int,      # 総Fixation数
-            'n_in_aoi': int          # AOI内のFixation数
-        }
-    """
-    if len(fixations) == 0:
-        return {
-            'aoi_rate': 0.0,
-            'improvement': 0.0 if original_rate is not None else None,
-            'n_fixations': 0,
-            'n_in_aoi': 0
-        }
-
-    rate_info = computeAllAOIRate(fixations, aois, tolerance)
-
-    result = {
-        'aoi_rate': rate_info['rate'],
-        'n_fixations': rate_info['total_fixations'],
-        'n_in_aoi': rate_info['fixations_in_aoi']
-    }
-
-    if original_rate is not None:
-        result['improvement'] = rate_info['rate'] - original_rate
-    else:
-        result['improvement'] = None
-
-    return result
-
-
 def _validate_segment_worker(task):
     """
     セグメント検証のワーカー関数（並列処理用）
@@ -4182,8 +3365,7 @@ def runClickAnchoredCorrection(eye_tracking_dir, event_log_path, coord_dir, phas
     # 2. セグメントを読み込み
     if verbose:
         print("Step 2: Loading segments...")
-    segments = readTobiiData(eye_tracking_dir, event_log_path, phase=phase,
-                             apply_head_correction=False)
+    segments = readTobiiData(eye_tracking_dir, event_log_path, phase=phase)
     if verbose:
         print(f"  Found {len(segments)} segments")
 
@@ -4539,153 +3721,250 @@ def process_segment_worker(args):
         return {"success": False, "segment_id": segment_id, "segment_index": segment_index, "error": f"{str(e)}\n{traceback.format_exc()}"}
 
 
-# =============================================================================
-# バッチ補正 並列処理
-# =============================================================================
-
-def _batch_correction_worker(task):
+def _processOnePhaseWorker(task):
     """
-    バッチ補正のワーカー関数（並列処理用）
+    1参加者・1フェーズの全セグメント処理（並列実行用ワーカー）
 
     Parameters:
     -----------
     task : dict
-        補正に必要なパラメータを含む辞書
+        処理に必要なパラメータを含む辞書
+        - group_letter : str — グループ名（'A' or 'B'）
+        - participant_id : str — 参加者ID（例: 'P001'）
+        - phase : str — フェーズ名（例: 'pre', 'training1'）
+        - corrections_path : str — 補正パラメータCSVのパス
+        - input_root : str — 入力データのルートディレクトリ
+        - output_root : str — 出力データのルートディレクトリ
+        - working_root : str — 作業データのルートディレクトリ
 
     Returns:
     --------
     dict
-        処理結果（成功/失敗情報を含む）
+        処理結果: {'label': str, 'success': bool, 'n_segments': int, 'error': str or None}
     """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+
+    group_letter = task['group_letter']
+    participant_id = task['participant_id']
+    phase = task['phase']
+    label = f"{group_letter}/{participant_id}/{phase}"
+
     try:
-        result = runClickAnchoredCorrection(
-            eye_tracking_dir=task['eye_tracking_dir'],
-            event_log_path=task['event_log_path'],
-            coord_dir=task['coord_dir'],
-            phase=task['phase'],
-            output_dir=task['output_dir'],
-            tolerance=task['tolerance'],
-            prefer_scaling=task['prefer_scaling'],
-            max_offset=task['max_offset'],
-            verbose=False
+        # --- パス設定 ---
+        base_dir = os.path.join(task['input_root'], group_letter, participant_id, phase)
+        output_base = os.path.join(task['output_root'], group_letter, participant_id, phase)
+        working_base = os.path.join(task['working_root'], group_letter, participant_id, phase)
+
+        eye_tracking_base = os.path.join(base_dir, "eye_tracking")
+        timestamp_dirs = sorted([
+            d for d in os.listdir(eye_tracking_base)
+            if os.path.isdir(os.path.join(eye_tracking_base, d))
+        ])
+        eye_tracking_dir = os.path.join(eye_tracking_base, timestamp_dirs[-1])
+
+        log_dir = os.path.join(base_dir, "logs")
+        event_files = sorted([f for f in os.listdir(log_dir) if f.endswith(".jsonl")])
+        event_log_path = os.path.join(log_dir, event_files[-1])
+
+        # --- データ読み込み ---
+        segments = readTobiiData(
+            eye_tracking_dir=eye_tracking_dir,
+            event_log_path=event_log_path,
+            phase=phase,
         )
+
+        # --- 補正パラメータの読み込み・フィルタ ---
+        all_corrections = pd.read_csv(task['corrections_path'])
+        participant_corrections = all_corrections[
+            (all_corrections["participant"] == participant_id)
+            & (all_corrections["phase"] == phase)
+        ].copy()
+
+        # --- セグメント処理 ---
+        fixation_cache = {}  # segment_index -> fx (detectFixationsの結果をキャッシュ)
+
+        for i, segment in enumerate(segments):
+            segment_index = i + 1
+            passage_id = segment["passage_id"]
+            img_num = segment["image_number"]
+            data = segment["data"]
+            image_path = segment["image_path"]
+
+            # 出力ディレクトリ作成
+            for subdir in [
+                "gaze_raw", "gaze_raw_corrected",
+                "scan_path", "scan_path_corrected",
+                "heatmap", "heatmap_corrected",
+            ]:
+                os.makedirs(os.path.join(output_base, subdir), exist_ok=True)
+            os.makedirs(os.path.join(working_base, "fixation"), exist_ok=True)
+            os.makedirs(os.path.join(working_base, "fixation_corrected"), exist_ok=True)
+
+            # 補正パラメータの取得
+            correction_row = participant_corrections[
+                participant_corrections["segment_index"] == segment_index
+            ]
+            has_correction = len(correction_row) > 0
+            if has_correction:
+                row = correction_row.iloc[0]
+                scale_x, scale_y = row["scale_x"], row["scale_y"]
+                offset_x, offset_y = row["offset_x"], row["offset_y"]
+                center_x, center_y = 960, 540
+
+            # 生の視線データ（補正前）
+            plotScanPath(
+                data[:, 1], data[:, 2],
+                np.array([50.0 for x in data]),
+                bg_image=image_path,
+                save_path=os.path.join(output_base, "gaze_raw", f"{img_num}.png"),
+            )
+            plt.close("all")
+
+            # 補正済み視線データ
+            if has_correction:
+                corrected_gaze_x = scale_x * (data[:, 1] - center_x) + center_x + offset_x
+                corrected_gaze_y = scale_y * (data[:, 2] - center_y) + center_y + offset_y
+            else:
+                corrected_gaze_x = data[:, 1]
+                corrected_gaze_y = data[:, 2]
+
+            plotScanPath(
+                corrected_gaze_x, corrected_gaze_y,
+                np.array([50.0 for x in data]),
+                bg_image=image_path,
+                save_path=os.path.join(output_base, "gaze_raw_corrected", f"{img_num}.png"),
+            )
+            plt.close("all")
+
+            # Fixation検出（1回だけ実行してキャッシュ）
+            fx = detectFixations(
+                data[:, 0], data[:, 1], data[:, 2], P=data[:, 3],
+                min_concat_gaze_count=9, min_fixation_size=20, max_fixation_size=40,
+            )
+            fixation_cache[segment_index] = fx
+
+            if fx.shape[0] == 0:
+                continue
+
+            # Fixationデータ保存（生データ）
+            np.savetxt(
+                os.path.join(working_base, "fixation", f"{img_num}.csv"), fx,
+                delimiter=",",
+                header="timestamp,x,y,duration,saccade_length,saccade_angle,saccade_speed,pupil_diameter",
+                comments="",
+            )
+
+            # 補正済みFixationデータの作成・保存
+            if has_correction:
+                corrected_fx = applyScalingAndOffset(
+                    fx, scale_x=scale_x, scale_y=scale_y,
+                    offset_x=offset_x, offset_y=offset_y,
+                )
+                corrected_fx = recalculateSaccadeMetrics(corrected_fx)
+            else:
+                corrected_fx = fx
+
+            np.savetxt(
+                os.path.join(working_base, "fixation_corrected", f"{img_num}.csv"),
+                corrected_fx, delimiter=",",
+                header="timestamp,x,y,duration,saccade_length,saccade_angle,saccade_speed,pupil_diameter",
+                comments="",
+            )
+
+            # スキャンパス（補正前）
+            plotScanPath(
+                fx[:, 1], fx[:, 2], fx[:, 3], bg_image=image_path,
+                save_path=os.path.join(output_base, "scan_path", f"{img_num}.png"),
+                duration_scale=1000,
+            )
+            plt.close("all")
+
+            # スキャンパス（補正後）
+            plotScanPath(
+                corrected_fx[:, 1], corrected_fx[:, 2], corrected_fx[:, 3],
+                bg_image=image_path,
+                save_path=os.path.join(output_base, "scan_path_corrected", f"{img_num}.png"),
+                duration_scale=1000,
+            )
+            plt.close("all")
+
+            # ヒートマップ（補正前）
+            plotHeatmap(
+                fx[:, 1], fx[:, 2], fx[:, 3], bg_image=image_path,
+                save_path=os.path.join(output_base, "heatmap", f"{img_num}.png"),
+            )
+            plt.close("all")
+
+            # ヒートマップ（補正後）
+            plotHeatmap(
+                corrected_fx[:, 1], corrected_fx[:, 2], corrected_fx[:, 3],
+                bg_image=image_path,
+                save_path=os.path.join(output_base, "heatmap_corrected", f"{img_num}.png"),
+            )
+            plt.close("all")
+
+        # --- 統計情報の出力（キャッシュ済みfixationを再利用） ---
+        stats = []
+        for i, segment in enumerate(segments):
+            segment_index = i + 1
+            fx = fixation_cache[segment_index]
+
+            stat = {
+                "image_number": segment["image_number"],
+                "duration_sec": segment["duration"],
+                "raw_samples": len(segment["data"]),
+                "fixation_count": len(fx),
+                "total_fixation_duration": fx[:, 3].sum() if len(fx) > 0 else 0,
+                "mean_fixation_duration": fx[:, 3].mean() if len(fx) > 0 else 0,
+                "mean_pupil_diameter": fx[:, 7].mean() if len(fx) > 0 else 0,
+            }
+
+            if "passage_id" in segment:
+                stat["passage_id"] = segment["passage_id"]
+            if "event_type" in segment:
+                stat["event_type"] = segment["event_type"]
+            if "analog_id" in segment:
+                stat["analog_id"] = segment["analog_id"]
+
+            correction_row = participant_corrections[
+                participant_corrections["segment_index"] == segment_index
+            ]
+            if len(correction_row) > 0:
+                row = correction_row.iloc[0]
+                stat["scale_x"] = row["scale_x"]
+                stat["scale_y"] = row["scale_y"]
+                stat["offset_x"] = row["offset_x"]
+                stat["offset_y"] = row["offset_y"]
+                stat["correction_method"] = row["method"]
+            else:
+                stat["scale_x"] = np.nan
+                stat["scale_y"] = np.nan
+                stat["offset_x"] = np.nan
+                stat["offset_y"] = np.nan
+                stat["correction_method"] = "none"
+
+            stats.append(stat)
+
+        stats_df = pd.DataFrame(stats)
+        os.makedirs(output_base, exist_ok=True)
+        stats_df.to_csv(os.path.join(output_base, "statistics.csv"), index=False)
+
         return {
+            'label': label,
             'success': True,
-            'group': task['group'],
-            'participant': task['participant'],
-            'phase': task['phase'],
-            'summary': result['summary'],
-            'segment_corrections': result['segment_corrections']
+            'n_segments': len(segments),
+            'error': None,
         }
+
     except Exception as e:
         import traceback
         return {
+            'label': label,
             'success': False,
-            'group': task['group'],
-            'participant': task['participant'],
-            'phase': task['phase'],
-            'error': f"{str(e)}\n{traceback.format_exc()}"
+            'n_segments': 0,
+            'error': f"{str(e)}\n{traceback.format_exc()}",
         }
-
-
-def runBatchCorrectionParallel(groups, phases, data_input, output_base,
-                                tolerance=5.0, prefer_scaling=True, max_offset=20.0,
-                                coord_participant='Test', n_workers=20):
-    """
-    全参加者・全フェーズに補正を適用（並列版）
-
-    Parameters:
-    -----------
-    groups : dict
-        グループ名 -> 参加者リストの辞書
-        例: {'A': ['P001', 'P002'], 'B': ['P003', 'P004']}
-    phases : list
-        処理するフェーズのリスト
-        例: ['pre', 'training1', 'training2', 'training3', 'post']
-    data_input : str
-        入力データのベースディレクトリ
-    output_base : str
-        出力ディレクトリのベースパス
-    tolerance : float
-        AOI境界からの許容距離（ピクセル）
-    prefer_scaling : bool
-        スケーリング重視モードを使用するか
-    max_offset : float
-        オフセットの最大絶対値（ピクセル）
-    coord_participant : str
-        座標ファイルを持つ参加者ID（通常はTest）
-    n_workers : int
-        並列ワーカー数
-
-    Returns:
-    --------
-    tuple (pd.DataFrame, pd.DataFrame)
-        (バッチサマリー, 全セグメント補正データ)
-    """
-    import pandas as pd
-    from glob import glob
-    from concurrent.futures import ProcessPoolExecutor, as_completed
-
-    # タスクリストを作成
-    tasks = []
-    for group, participants in groups.items():
-        for participant in participants:
-            for phase in phases:
-                participant_dir = os.path.join(data_input, group, participant, phase)
-                if not os.path.exists(participant_dir):
-                    continue
-
-                eye_tracking_dirs = sorted(glob(os.path.join(participant_dir, 'eye_tracking', '*')))
-                event_log_files = sorted(glob(os.path.join(participant_dir, 'logs', 'events_*.jsonl')))
-                coord_dir = os.path.join(data_input, group, coord_participant, phase, 'coordinates')
-
-                if not eye_tracking_dirs or not event_log_files or not os.path.exists(coord_dir):
-                    continue
-
-                tasks.append({
-                    'group': group,
-                    'participant': participant,
-                    'phase': phase,
-                    'eye_tracking_dir': eye_tracking_dirs[0],
-                    'event_log_path': event_log_files[0],
-                    'coord_dir': coord_dir,
-                    'output_dir': os.path.join(output_base, group, participant, phase),
-                    'tolerance': tolerance,
-                    'prefer_scaling': prefer_scaling,
-                    'max_offset': max_offset
-                })
-
-    print(f"Total tasks: {len(tasks)}, Workers: {n_workers}")
-
-    all_results = []
-    all_segment_corrections = []
-
-    with ProcessPoolExecutor(max_workers=n_workers) as executor:
-        futures = {executor.submit(_batch_correction_worker, task): task for task in tasks}
-        for future in as_completed(futures):
-            result = future.result()
-            if result['success']:
-                summary = result['summary'].copy()
-                summary['group'] = result['group']
-                summary['participant'] = result['participant']
-                summary['phase'] = result['phase']
-                all_results.append(summary)
-
-                seg_corr = result['segment_corrections'].copy()
-                seg_corr['group'] = result['group']
-                seg_corr['participant'] = result['participant']
-                seg_corr['phase'] = result['phase']
-                all_segment_corrections.append(seg_corr)
-
-                print(f"  {result['group']}/{result['participant']}/{result['phase']}: "
-                      f"{summary['mean_original_rate']:.3f} -> {summary['mean_corrected_rate']:.3f} "
-                      f"({summary['mean_improvement']:+.3f})")
-            else:
-                print(f"  {result['group']}/{result['participant']}/{result['phase']}: Error - {result['error'][:100]}")
-
-    if all_segment_corrections:
-        all_corrections_df = pd.concat(all_segment_corrections, ignore_index=True)
-    else:
-        all_corrections_df = pd.DataFrame()
-
-    return pd.DataFrame(all_results), all_corrections_df
