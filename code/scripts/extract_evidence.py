@@ -198,22 +198,22 @@ def extract_evidence_with_llm(
         model="gpt-5.2",
         instructions="あなたは英語読解問題の分析専門家です。JSONフォーマットで回答してください。",
         input=prompt,
-        temperature=0.0
+        temperature=0.0,
+        max_output_tokens=4096
     )
 
     response_text = response.output_text
 
     # JSONを抽出
     json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
-    if json_match:
-        try:
-            return json.loads(json_match.group(1))
-        except json.JSONDecodeError:
-            pass
+    json_text = json_match.group(1) if json_match else response_text
 
-    # JSONブロックなしの場合
+    # 引用符なしのキーを修正 (passage_index: → "passage_index":)
+    # JSONのキー位置（{ や , の後）のみにマッチさせる
+    json_text = re.sub(r'([\{\,]\s*)([a-z_]+)(\s*:)', r'\1"\2"\3', json_text)
+
     try:
-        return json.loads(response_text)
+        return json.loads(json_text)
     except json.JSONDecodeError:
         return {
             'error': 'Failed to parse LLM response',
