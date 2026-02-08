@@ -2158,6 +2158,137 @@ def computeAllAOIRate(fixations, aois, tolerance=0.0):
     }
 
 
+def computePerAOIStatistics(fixations, aois, segment_start=None, tolerance=0.0):
+    """
+    AOIごとの視線指標を算出する
+
+    Parameters
+    ----------
+    fixations : np.ndarray
+        detectFixations() の出力 (N, 8)。
+        [:, 0]=timestamp, [:, 1]=x, [:, 2]=y, [:, 3]=duration
+    aois : list of dict
+        extractAllAOIs() の出力。各要素に 'id', 'level', 'text', 'bbox' (+ 'bboxes', 'is_multiline') を含む
+    segment_start : float or None
+        FFTの基準時刻（秒）。Noneなら最初のfixationのタイムスタンプを使用
+    tolerance : float
+        AOI境界の許容距離（px）
+
+    Returns
+    -------
+    list of dict
+        AOIごとに1要素:
+        {
+            "aoi_id": "psg_0_para_1_sent_2",
+            "level": "sentence",
+            "text": "...",
+            "first_fixation_time": 3.245,   # segment_startからの秒数（未注視ならNone）
+            "total_duration": 1823.0,       # 総注視時間（ms）
+            "mean_duration": 304.5,         # 平均注視時間（ms）
+            "fixation_count": 6,            # 注視回数
+        }
+    """
+    if len(fixations) == 0 or len(aois) == 0:
+        return [
+            {
+                "aoi_id": aoi['id'],
+                "level": aoi.get('level', ''),
+                "text": aoi.get('text', ''),
+                "first_fixation_time": None,
+                "total_duration": 0.0,
+                "mean_duration": 0.0,
+                "fixation_count": 0,
+            }
+            for aoi in aois
+        ]
+
+    if segment_start is None:
+        segment_start = fixations[0, 0]
+
+    # 全bboxを展開し、各bboxがどのAOIに属するかを記録
+    all_bboxes = []
+    bbox_to_aoi = []
+    for aoi_idx, aoi in enumerate(aois):
+        if aoi.get('is_multiline') and 'bboxes' in aoi:
+            for bbox in aoi['bboxes']:
+                all_bboxes.append([
+                    bbox['x'] - tolerance,
+                    bbox['y'] - tolerance,
+                    bbox['x'] + bbox['width'] + tolerance,
+                    bbox['y'] + bbox['height'] + tolerance,
+                ])
+                bbox_to_aoi.append(aoi_idx)
+        elif 'bbox' in aoi:
+            bbox = aoi['bbox']
+            all_bboxes.append([
+                bbox['x'] - tolerance,
+                bbox['y'] - tolerance,
+                bbox['x'] + bbox['width'] + tolerance,
+                bbox['y'] + bbox['height'] + tolerance,
+            ])
+            bbox_to_aoi.append(aoi_idx)
+
+    if len(all_bboxes) == 0:
+        return [
+            {
+                "aoi_id": aoi['id'],
+                "level": aoi.get('level', ''),
+                "text": aoi.get('text', ''),
+                "first_fixation_time": None,
+                "total_duration": 0.0,
+                "mean_duration": 0.0,
+                "fixation_count": 0,
+            }
+            for aoi in aois
+        ]
+
+    bbox_arr = np.array(all_bboxes)          # (M, 4)
+    bbox_to_aoi = np.array(bbox_to_aoi)      # (M,)
+    n_aois = len(aois)
+
+    # Fixation座標: (N,)
+    fx = fixations[:, 1]
+    fy = fixations[:, 2]
+
+    # ブロードキャストでbboxマッチング: (N, M)
+    in_x = (fx[:, None] >= bbox_arr[:, 0]) & (fx[:, None] <= bbox_arr[:, 2])
+    in_y = (fy[:, None] >= bbox_arr[:, 1]) & (fy[:, None] <= bbox_arr[:, 3])
+    in_bbox = in_x & in_y  # (N, M)
+
+    # bboxからAOIへマッピング: (N, n_aois)
+    fixation_in_aoi = np.zeros((len(fixations), n_aois), dtype=bool)
+    for m in range(len(all_bboxes)):
+        fixation_in_aoi[:, bbox_to_aoi[m]] |= in_bbox[:, m]
+
+    # 各AOIの指標を算出
+    timestamps = fixations[:, 0]
+    durations = fixations[:, 3]
+    results = []
+    for aoi_idx, aoi in enumerate(aois):
+        mask = fixation_in_aoi[:, aoi_idx]
+        count = int(mask.sum())
+        if count > 0:
+            first_ts = timestamps[mask].min()
+            fft = float(first_ts - segment_start)
+            total_dur = float(durations[mask].sum())
+            mean_dur = float(durations[mask].mean())
+        else:
+            fft = None
+            total_dur = 0.0
+            mean_dur = 0.0
+        results.append({
+            "aoi_id": aoi['id'],
+            "level": aoi.get('level', ''),
+            "text": aoi.get('text', ''),
+            "first_fixation_time": fft,
+            "total_duration": total_dur,
+            "mean_duration": mean_dur,
+            "fixation_count": count,
+        })
+
+    return results
+
+
 # =============================================================================
 # 視線補正（スケーリング + オフセット）
 # =============================================================================
@@ -3499,6 +3630,20 @@ def runClickAnchoredCorrection(eye_tracking_dir, event_log_path, coord_dir, phas
         print(f"  Mean scale: ({summary['mean_scale_x']:.4f}, {summary['mean_scale_y']:.4f})")
         print(f"  Mean offset: ({summary['mean_offset_x']:.1f}, {summary['mean_offset_y']:.1f}) px")
 
+    # validation_resultsの最終合成パラメータ(Stage1+Stage2)をsegment_correctionsに反映
+    if validation_results:
+        final_params = {
+            v['segment_index']: v for v in validation_results
+        }
+        for idx in segment_corrections.index:
+            seg_idx = segment_corrections.loc[idx, 'segment_index']
+            if seg_idx in final_params:
+                fp = final_params[seg_idx]
+                segment_corrections.loc[idx, 'scale_x'] = fp['scale_x']
+                segment_corrections.loc[idx, 'scale_y'] = fp['scale_y']
+                segment_corrections.loc[idx, 'offset_x'] = fp['offset_x']
+                segment_corrections.loc[idx, 'offset_y'] = fp['offset_y']
+
     # 結果を保存
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
@@ -3892,6 +4037,7 @@ def _processOnePhaseWorker(task):
 
         # --- セグメント処理 ---
         fixation_cache = {}  # segment_index -> fx (detectFixationsの結果をキャッシュ)
+        corrected_cache = {}  # segment_index -> corrected_fx (補正後fixationをキャッシュ)
 
         for i, segment in enumerate(segments):
             segment_index = i
@@ -3974,6 +4120,8 @@ def _processOnePhaseWorker(task):
             else:
                 corrected_fx = fx
 
+            corrected_cache[segment_index] = corrected_fx
+
             np.savetxt(
                 os.path.join(working_base, "fixation_corrected", f"{img_num}.csv"),
                 corrected_fx, delimiter=",",
@@ -4018,16 +4166,45 @@ def _processOnePhaseWorker(task):
         for i, segment in enumerate(segments):
             segment_index = i
             fx = fixation_cache[segment_index]
+            cfx = corrected_cache.get(segment_index, fx)
 
+            # --- 基本情報 ---
             stat = {
                 "image_number": segment["image_number"],
                 "duration_sec": segment["duration"],
                 "raw_samples": len(segment["data"]),
-                "fixation_count": len(fx),
-                "total_fixation_duration": fx[:, 3].sum() if len(fx) > 0 else 0,
-                "mean_fixation_duration": fx[:, 3].mean() if len(fx) > 0 else 0,
-                "mean_pupil_diameter": fx[:, 7].mean() if len(fx) > 0 else 0,
             }
+
+            # --- 固視指標 ---
+            stat["fixation_count"] = len(fx)
+            stat["fixation_rate"] = len(fx) / segment["duration"] if segment["duration"] > 0 else 0
+            stat["total_fixation_duration"] = fx[:, 3].sum() if len(fx) > 0 else 0
+            stat["mean_fixation_duration"] = fx[:, 3].mean() if len(fx) > 0 else 0
+            stat["std_fixation_duration"] = float(np.std(fx[:, 3], ddof=1)) if len(fx) > 1 else 0
+
+            # --- 瞳孔指標 ---
+            stat["mean_pupil_diameter"] = fx[:, 7].mean() if len(fx) > 0 else 0
+            stat["std_pupil_diameter"] = float(np.std(fx[:, 7], ddof=1)) if len(fx) > 1 else 0
+
+            # --- サッカード指標（補正後座標を使用、最初の固視のサッカード=0を除外） ---
+            if len(cfx) > 1:
+                sac_lengths = cfx[1:, 4]
+                sac_angles = cfx[1:, 5]
+                sac_speeds = cfx[1:, 6]
+                valid_lengths = sac_lengths[sac_lengths > 0]
+                valid_angles = sac_angles[~np.isnan(sac_angles)]
+
+                stat["mean_saccade_length"] = float(np.mean(valid_lengths)) if len(valid_lengths) > 0 else 0
+                stat["std_saccade_length"] = float(np.std(valid_lengths, ddof=1)) if len(valid_lengths) > 1 else 0
+                stat["mean_saccade_speed"] = float(np.mean(sac_speeds[sac_speeds > 0])) if np.any(sac_speeds > 0) else 0
+                stat["std_saccade_speed"] = float(np.std(sac_speeds[sac_speeds > 0], ddof=1)) if np.sum(sac_speeds > 0) > 1 else 0
+                stat["regression_rate"] = float(np.sum(np.abs(valid_angles) > 90) / len(valid_angles)) if len(valid_angles) > 0 else 0
+            else:
+                stat["mean_saccade_length"] = 0
+                stat["std_saccade_length"] = 0
+                stat["mean_saccade_speed"] = 0
+                stat["std_saccade_speed"] = 0
+                stat["regression_rate"] = 0
 
             if "passage_id" in segment:
                 stat["passage_id"] = segment["passage_id"]
